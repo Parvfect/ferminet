@@ -38,6 +38,7 @@ from ferminet.utils import system
 from ferminet.utils import utils
 from ferminet.utils import writers
 from ferminet.minsr import MinSR
+from ferminet.training_monitoring import wandb_login, start_wandb_run
 import jax
 from jax.experimental import multihost_utils
 import jax.numpy as jnp
@@ -46,6 +47,13 @@ import ml_collections
 import numpy as np
 import optax
 from typing_extensions import Protocol
+import wandb
+
+
+def setup_wandb(config={}, running_on_hpc=False):
+  # Training monitoring on wandb
+  wandb_login(running_on_hpc=running_on_hpc)
+  start_wandb_run(config=config, project_name="ferminet")
 
 
 def _assign_spin_configuration(
@@ -481,7 +489,7 @@ def make_minsr_training_step(
 
 
 
-def train(cfg: ml_collections.ConfigDict, writer_manager=None):
+def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=True):
   """Runs training loop for QMC.
 
   Args:
@@ -493,6 +501,12 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
   Raises:
     ValueError: if an illegal or unsupported value in cfg is detected.
   """
+  print(f"cfg.optim.optimizer = {repr(cfg.optim.optimizer)}")
+
+  # Setting up wandb tracking
+  if wandb_monitoring:
+    setup_wandb(running_on_hpc=False, config=cfg.to_dict())
+
   # Device logging
   num_devices = jax.local_device_count()
   num_hosts = jax.device_count() // num_devices
@@ -970,7 +984,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
 
   elif cfg.optim.optimizer == 'minsr':
     optimizer = MinSR(
-      lr=learning_rate_schedule,
+      lr=0.01,
       damping=1e-4,
       adaptive_step=False
     )
@@ -998,6 +1012,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         reset_if_nan=cfg.optim.reset_if_nan)
     
   elif isinstance(optimizer, MinSR):
+    opt_state = None
     step = make_minsr_training_step(
         mcmc_step=mcmc_step,
         optimizer_step=make_minsr_opt_update_step(evaluate_loss, optimizer),
@@ -1125,6 +1140,17 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         logging_str = ('Step %05d: '
                        '%03.4f E_h, exp. variance=%03.4f E_h^2, pmove=%0.2f')
         logging_args = t, loss, weighted_stats.variance, pmove
+
+        if wandb_monitoring:
+          # wandb logging
+          metrics = {
+                  "mean_energy": loss,
+                  "variance": weighted_stats.variance,
+                  "pmove": pmove
+              }
+
+          wandb.log(metrics)
+
         writer_kwargs = {
             'step': t,
             'energy': np.asarray(loss),
