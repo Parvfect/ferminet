@@ -275,7 +275,8 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
       params: networks.ParamTree,
       data: networks.FermiNetData,
       opt_state: Optional[optax.OptState],
-      key: chex.PRNGKey
+      key: chex.PRNGKey,
+      type = 'minsr'
   ) -> OptUpdateResults:
     """Evaluates the loss and gradients and updates the parameters using optax."""
 
@@ -296,8 +297,14 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
     
     def fisher_matmul(
         v, centre_gradients=True, damping=1e-4):
-      log_psi_jac_v = jvp_func(v)
-      update_vector = vjp_func(log_psi_jac_v / batch_size)
+      
+      if type == 'sr':
+        log_psi_jac_v = jvp_func(v)
+        update_vector = vjp_func(log_psi_jac_v / batch_size)
+      
+      elif type == 'minsr':
+        log_psi_jac_v = vjp_func(v)
+        update_vector =  jvp_func(v) / batch_size
 
       if centre_gradients:
           update_vector -= jnp.mean(update_vector)
@@ -305,11 +312,14 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
       update_vector += damping * v
       return update_vector
     
-    grads = jax.scipy.sparse.linalg.cg(
-      fisher_matmul, flat_grads, maxiter=100)[0]
-    
-    #flat_params, _ = jax.flatten_util.ravel_pytree(params)
-    # If it needs a pytree, I can create it here quite easily
+    if type == 'sr':
+      grads = jax.scipy.sparse.linalg.cg(
+        fisher_matmul, flat_grads, maxiter=100)[0]
+    else:
+      grads = jvp_func(
+        jax.scipy.sparse.linalg.cg(
+        fisher_matmul, flat_grads)[0]
+      )
 
     updates, opt_state = optimizer.update(grads, opt_state, params)
     new_params = optax.apply_updates(params, updates)
