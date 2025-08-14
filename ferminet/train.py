@@ -265,45 +265,55 @@ def make_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
 
 
 def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
-                         optimizer: MinSR) -> OptUpdate:
+                         optimizer: MinSR, batch_network) -> OptUpdate:
   """Returns an OptUpdate function for performing a parameter update."""
 
   # Differentiate wrt parameters (argument 0)
   loss_and_grad = jax.value_and_grad(evaluate_loss, argnums=0, has_aux=True)
-
+  
   def opt_update( 
       params: networks.ParamTree,
       data: networks.FermiNetData,
       opt_state: Optional[optax.OptState],
-      key: chex.PRNGKey,
-      flat_grads: networks.ParamTree
+      key: chex.PRNGKey
   ) -> OptUpdateResults:
     """Evaluates the loss and gradients and updates the parameters using optax."""
+
     (loss, aux_data), grad = loss_and_grad(params, key, data)
+    flat_grads, unravel_fn = jax.flatten_util.ravel_pytree(grad)
+    energies = aux_data.local_energy - loss
+    batch_size = energies.shape[0]
+  
+    def f(params):
+      return batch_network(
+        params, data.positions, data.spins, data.atoms, data.charges)
 
-    #mean_grad = constants.pmean(grad)  # In case we want to centre the gradients
-
-    energies = aux_data.local_energy - aux_data.energy  # Centered local energies
-
-    grunter = flat_grads @ flat_grads.T / flat_grads.shape[0] + optimizer.damping * jnp.eye(flat_grads.shape[0])  # X^T X + \lambda I
+    jvp_func = lambda x: jax.linearize(f, params)[1](
+      unravel_fn(x))
     
-    #grunter_inv = jnp.linalg.solve(grunter, jnp.eye(grunter.shape[0]))
-
-    L = jnp.linalg.cholesky(grunter)
-    grunter_inv = jax.scipy.linalg.cho_solve((L, True), jnp.eye(grunter.shape[0]))
-
-    grads = flat_grads.T @ grunter_inv * energies
-    grads = jnp.mean(grads, axis=1)
+    vjp_func = lambda v: jax.flatten_util.ravel_pytree(
+      jax.vjp(f, params)[1](v))[0]
     
-    flat_params, unravel_params = jax.flatten_util.ravel_pytree(params)
+    def fisher_matmul(
+        v, centre_gradients=True, damping=1e-4):
+      log_psi_jac_v = jvp_func(v)
+      update_vector = vjp_func(log_psi_jac_v / batch_size)
+
+      if centre_gradients:
+          update_vector -= jnp.mean(update_vector)
+      
+      update_vector += damping * v
+      return update_vector
+    
+    grads = jax.scipy.sparse.linalg.cg(
+      fisher_matmul, flat_grads, maxiter=100)[0]
+    
+    flat_params, _ = jax.flatten_util.ravel_pytree(params)
     new_flat_params = flat_params - optimizer.lr * grads
-    
-    new_params = unravel_params(new_flat_params)
-    
+    new_params = unravel_fn(new_flat_params)
     return new_params, opt_state, loss, aux_data
 
   return opt_update
-
 
 
 def make_loss_step(evaluate_loss: qmc_loss_functions.LossFn) -> OptUpdate:
@@ -352,7 +362,8 @@ def make_training_step(
     """A full update iteration (except for KFAC): MCMC steps + optimization."""
     # MCMC loop
     mcmc_key, loss_key = jax.random.split(key, num=2)
-    data, pmove = mcmc_step(params, data, mcmc_key, mcmc_width)
+    data, pmove = mcmc_step(
+      params, data, mcmc_key, mcmc_width)
 
     # Optimization step
     new_params, new_state, loss, aux_data = optimizer_step(params,
@@ -440,6 +451,7 @@ def make_kfac_training_step(
 def make_minsr_training_step(
     mcmc_step,
     optimizer_step: OptUpdate,
+    logabs_network,
     reset_if_nan: bool = False,
 ) -> Step:
   """Factory to create traning step for non-KFAC optimizers.
@@ -462,20 +474,21 @@ def make_minsr_training_step(
       params: networks.ParamTree,
       state: Optional[optax.OptState],
       key: chex.PRNGKey,
-      mcmc_width: jnp.ndarray,
+      mcmc_width: jnp.ndarray
   ) -> StepResults:
     """A full update iteration (except for KFAC): MCMC steps + optimization."""
     # MCMC loop
     mcmc_key, loss_key = jax.random.split(key, num=2)
-    data, pmove, flat_grads = mcmc_step(
-      params, data, mcmc_key, mcmc_width, get_flat_grads=True)
+    
+    #mcmc_keys, loss_keys = kfac_jax.utils.p_split(key)
+    data, pmove = mcmc_step(
+      params, data, mcmc_key, mcmc_width)
 
     # Optimization step
     new_params, new_state, loss, aux_data = optimizer_step(params,
                                                            data,
                                                            state,
-                                                           loss_key,
-                                                           flat_grads)
+                                                           loss_key)
     if reset_if_nan:
       new_params = jax.lax.cond(jnp.isnan(loss),
                                 lambda: params,
@@ -506,6 +519,8 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
   # Setting up wandb tracking
   if wandb_monitoring:
     setup_wandb(running_on_hpc=False, config=cfg.to_dict())
+
+  jax.config.update('jax_disable_jit', True)  # Disabling jit to check if its causing OOM
 
   # Device logging
   num_devices = jax.local_device_count()
@@ -984,7 +999,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
 
   elif cfg.optim.optimizer == 'minsr':
     optimizer = MinSR(
-      lr=0.01,
+      lr=0.05,
       damping=1e-4,
       adaptive_step=False
     )
@@ -1015,8 +1030,10 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
     opt_state = None
     step = make_minsr_training_step(
         mcmc_step=mcmc_step,
-        optimizer_step=make_minsr_opt_update_step(evaluate_loss, optimizer),
-        reset_if_nan=cfg.optim.reset_if_nan)
+        optimizer_step=make_minsr_opt_update_step(
+          evaluate_loss, optimizer, batch_network),
+        reset_if_nan=cfg.optim.reset_if_nan,
+        logabs_network=logabs_network)
   else:
     raise ValueError(f'Unknown optimizer: {optimizer}')
 
@@ -1085,6 +1102,8 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
         directory=ckpt_save_path,
         iteration_key=None,
         log=False)
+
+  #return evaluate_loss, mcmc_step, sharded_key, data, params, mcmc_width, logabs_network
   with writer_manager as writer:
     # Main training loop
     num_resets = 0  # used if reset_if_nan is true
