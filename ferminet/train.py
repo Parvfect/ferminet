@@ -308,9 +308,14 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
     grads = jax.scipy.sparse.linalg.cg(
       fisher_matmul, flat_grads, maxiter=100)[0]
     
-    flat_params, _ = jax.flatten_util.ravel_pytree(params)
-    new_flat_params = flat_params - optimizer.lr * grads
-    new_params = unravel_fn(new_flat_params)
+    #flat_params, _ = jax.flatten_util.ravel_pytree(params)
+    # If it needs a pytree, I can create it here quite easily
+
+    updates, opt_state = optimizer.update(grads, opt_state, params)
+    new_params = optax.apply_updates(params, updates)
+
+    #new_flat_params = flat_params - optimizer.lr * grads
+    #new_params = unravel_fn(new_flat_params)
     return new_params, opt_state, loss, aux_data
 
   return opt_update
@@ -998,11 +1003,14 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
     opt_state = opt_state_ckpt or opt_state  # avoid overwriting ckpted state
 
   elif cfg.optim.optimizer == 'minsr':
-    optimizer = MinSR(
-      lr=0.05,
-      damping=1e-4,
-      adaptive_step=False
-    )
+    optimizer = optax.chain(
+        optax.scale_by_schedule(learning_rate_schedule),
+        optax.scale(-1.))
+    #optimizer = MinSR(
+    #  lr=0.05,
+    #  damping=1e-4,
+    #  adaptive_step=False
+    #)
   else:
     raise ValueError(f'Not a recognized optimizer: {cfg.optim.optimizer}')
 
