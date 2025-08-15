@@ -276,7 +276,8 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
       data: networks.FermiNetData,
       opt_state: Optional[optax.OptState],
       key: chex.PRNGKey,
-      type = 'minsr'
+      type = 'minsr',
+      solver = 'cg'
   ) -> OptUpdateResults:
     """Evaluates the loss and gradients and updates the parameters using optax."""
 
@@ -316,10 +317,17 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
       grads = jax.scipy.sparse.linalg.cg(
         fisher_matmul, flat_grads, maxiter=100)[0]
     else:
-      grads = jvp_func(
-        jax.scipy.sparse.linalg.cg(
-        fisher_matmul, flat_grads)[0]
-      )
+      if solver =='cg':
+        grads = jvp_func(
+          jax.scipy.sparse.linalg.cg(
+          fisher_matmul, energies)[0]
+        )
+      elif solver == 'linear':
+        grads = jvp_func(jax.lax.custom_linear_solve(
+          fisher_matmul, energies)[0]
+        )
+      else:
+        return params, opt_state, loss, aux_data
 
     updates, opt_state = optimizer.update(grads, opt_state, params)
     new_params = optax.apply_updates(params, updates)
