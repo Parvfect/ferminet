@@ -120,6 +120,14 @@ def default() -> ml_collections.ConfigDict:
               'eps': 1.0e-8,
               'eps_root': 0.0,
           },
+          'sr':{
+            'ntk': False,
+            'damping': 1e-4,
+            'ntk_solver': 'linear',
+            'centre_gradients': True,
+            'preconditioning': False,
+            'preset_guess': 'grad'  # grad or loss_energies
+          }
       },
       'log': {
           'stats_frequency': 1,  # iterations between logging of stats

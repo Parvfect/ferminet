@@ -276,7 +276,7 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
       data: networks.FermiNetData,
       opt_state: Optional[optax.OptState],
       key: chex.PRNGKey,
-      type = 'minsr',
+      type = 'sr',
       solver = 'cg'
   ) -> OptUpdateResults:
     """Evaluates the loss and gradients and updates the parameters using optax."""
@@ -297,7 +297,7 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
       jax.vjp(f, params)[1](v))[0]
     
     def fisher_matmul(
-        v, centre_gradients=True, damping=1e-4):
+        v, centre_gradients=True, damping=1e-2):
       
       if type == 'sr':
         log_psi_jac_v = jvp_func(v)
@@ -315,7 +315,7 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
     
     if type == 'sr':
       grads = jax.scipy.sparse.linalg.cg(
-        fisher_matmul, flat_grads, maxiter=100)[0]
+        fisher_matmul, flat_grads, x0=flat_grads, maxiter=100)[0]
     else:
       if solver =='cg':
         grads = jvp_func(
@@ -329,6 +329,7 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
       else:
         return params, opt_state, loss, aux_data
 
+    grads = constants.pmean(grads)  # Handling for multi-gpu
     updates, opt_state = optimizer.update(grads, opt_state, params)
     new_params = optax.apply_updates(params, updates)
 
@@ -1024,6 +1025,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
     optimizer = optax.chain(
         optax.scale_by_schedule(learning_rate_schedule),
         optax.scale(-1.))
+    sr_object = 
     #optimizer = MinSR(
     #  lr=0.05,
     #  damping=1e-4,

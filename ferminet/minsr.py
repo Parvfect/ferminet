@@ -1,8 +1,13 @@
 
 
-class MinSR:
+class SR:
 
-    def __init__(self, lr=0.01, damping=1e-4, adaptive_step=False):
-        self.lr = lr
+    def __init__(
+            self, ntk=False, damping=1e-4, centre_gradients=True, ntk_solver = 'linear', preconditioning = False, preset_guess = 'loss'):
+        self.ntk = ntk
         self.damping = damping
-        self.adaptive_step = adaptive_step
+        self.centre_gradients = centre_gradients
+        self.ntk_solver = ntk_solver
+        self.preconditioning = preconditioning
+        self.preset_guess = preset_guess
+        
