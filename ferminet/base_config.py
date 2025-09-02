@@ -53,16 +53,10 @@ def default() -> ml_collections.ConfigDict:
       # importlib.import_module.
       'config_module': __name__,
       'optim': {
-          # Objective type. One of:
-          # 'vmc': minimise <H> by standard VMC energy minimization
-          # 'wqmc': minimise <H> by Wasserstein QMC
-          # 'vmc_overlap': minimize \sum_i <H_i> + \lambda \sum_ij <psi_i psi_j>
-          'objective': 'vmc',
+          'objective': 'vmc',  # objective type. Either 'vmc' or 'wqmc'
           'iterations': 1000000,  # number of iterations
           'optimizer': 'kfac',  # one of adam, kfac, lamb, none
           'laplacian': 'default',  # of of default or folx (for forward lapl)
-          # If 0, use standard vmap. If >0, the max batch size for batched_vmap
-          'max_vmap_batch_size': 0,
           'lr': {
               'rate': 0.05,  # learning rate
               'decay': 1.0,  # exponent of learning rate decay
@@ -83,21 +77,6 @@ def default() -> ml_collections.ConfigDict:
           # step and revert them if they become NaN after an update. Mainly
           # useful for excited states
           'reset_if_nan': False,
-          # If using Wasserstein QMC, this parameter controls the amount of
-          # "default" VMC gradient to mix in. Otherwise, it is ignored.
-          'vmc_weight': 0.0,
-          # If nonzero, add a term to the Hamiltonian proportional to the spin
-          # magnitude. Useful for removing non-singlet states from excited
-          # state calculations.
-          'spin_energy': 0.0,
-          # If 'objective' is 'vmc_overlap', these parameters control the
-          # penalty term.
-          'overlap': {
-              # Weights on each state. Generate automatically if none provided.
-              'weights': None,
-              # Strength of the penalty term
-              'penalty': 1.0,
-          },
           # KFAC hyperparameters. See KFAC documentation for details.
           'kfac': {
               'invert_every': 1,
@@ -219,6 +198,9 @@ def default() -> ml_collections.ConfigDict:
           # mean of the distance to the nuclei.
           'scale_by_nuclear_distance': False,
           'blocks': 1,  # Number of blocks to split the MCMC sampling into
+          # If true, define separate widths for the proposal distribution per
+          # spin species during MCMC sampling
+          'separate_spin_moves': False
       },
       'network': {
           'network_type': 'ferminet',  # One of 'ferminet' or 'psiformer'.
@@ -264,12 +246,13 @@ def default() -> ml_collections.ConfigDict:
           },
           # Only used if network_type is 'psiformer'.
           'psiformer': {
-              # PsiFormer architecture: von Glehn, Spencer, Pfau, ICLR 2023.
-              'num_layers': 4,
+              # PsiFormer architecture: von Glehn, Spencer, Pfau,
+              # arXiv:2211.13672 (2022), accepted to ICLR 2023.
+              'num_layers': 2,
               'num_heads': 4,
               'heads_dim': 64,
               'mlp_hidden_dims': (256,),
-              'use_layer_norm': True,
+              'use_layer_norm': False,
           },
           # Config common to all architectures.
           'determinants': 16,  # Number of determinants.
@@ -311,14 +294,6 @@ def default() -> ml_collections.ConfigDict:
           'method': 'hf',  # Currently only 'hf' is supported.
           'iterations': 1000,  # Only used if method is 'hf'.
           'basis': 'ccpvdz',  # Larger than STO-6G, but good for excited states
-          # Fraction of SCF to use in pretraining MCMC. This enables pretraining
-          # similar to the original FermiNet paper.
-          'scf_fraction': 1.0,
-          # The way to construct different states for excited state pretraining.
-          # One of 'ordered' or 'random'. 'Ordered' tends to work better, but
-          # 'random' is necessary for some systems, especially double
-          # excitations.
-          'excitation_type': 'ordered',
       },
   })
 

@@ -62,7 +62,6 @@ def init_electrons(  # pylint: disable=dangerous-default-value
     batch_size: int,
     init_width: float,
     core_electrons: Mapping[str, int] = {},
-    max_iter: int = 10_000,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
   """Initializes electron positions around each atom.
 
@@ -76,9 +75,6 @@ def init_electrons(  # pylint: disable=dangerous-default-value
       electron configurations.
     core_electrons: mapping of element symbol to number of core electrons
       included in the pseudopotential.
-    max_iter: maximum number of iterations to try to find a valid initial
-        electron configuration for each atom. If reached, all electrons are
-        initialised from a Gaussian distribution centred on the origin.
 
   Returns:
     array of (batch_size, (nalpha+nbeta)*ndim) of initial (random) electron
@@ -87,7 +83,6 @@ def init_electrons(  # pylint: disable=dangerous-default-value
     of spin configurations, where 1 and -1 indicate alpha and beta electrons
     respectively.
   """
-  niter = 0
   total_electrons = sum(atom.charge - core_electrons.get(atom.symbol, 0)
                         for atom in molecule)
   if total_electrons != sum(electrons):
@@ -103,35 +98,19 @@ def init_electrons(  # pylint: disable=dangerous-default-value
         for atom in molecule
     ]
     assert sum(sum(x) for x in atomic_spin_configs) == sum(electrons)
-    while (
-        tuple(sum(x) for x in zip(*atomic_spin_configs)) != electrons
-        and niter < max_iter
-    ):
+    while tuple(sum(x) for x in zip(*atomic_spin_configs)) != electrons:
       i = np.random.randint(len(atomic_spin_configs))
       nalpha, nbeta = atomic_spin_configs[i]
       atomic_spin_configs[i] = nbeta, nalpha
-      niter += 1
 
-  if tuple(sum(x) for x in zip(*atomic_spin_configs)) == electrons:
-    # Assign each electron to an atom initially.
-    electron_positions = []
-    for i in range(2):
-      for j in range(len(molecule)):
-        atom_position = jnp.asarray(molecule[j].coords)
-        electron_positions.append(
-            jnp.tile(atom_position, atomic_spin_configs[j][i]))
-    electron_positions = jnp.concatenate(electron_positions)
-  else:
-    logging.warning(
-        'Failed to find a valid initial electron configuration after %i'
-        ' iterations. Initializing all electrons from a Gaussian distribution'
-        ' centred on the origin. This might require increasing the number of'
-        ' iterations used for pretraining and MCMC burn-in. Consider'
-        ' implementing a custom initialisation.',
-        niter,
-    )
-    electron_positions = jnp.zeros(shape=(3*sum(electrons),))
-
+  # Assign each electron to an atom initially.
+  electron_positions = []
+  for i in range(2):
+    for j in range(len(molecule)):
+      atom_position = jnp.asarray(molecule[j].coords)
+      electron_positions.append(
+          jnp.tile(atom_position, atomic_spin_configs[j][i]))
+  electron_positions = jnp.concatenate(electron_positions)
   # Create a batch of configurations with a Gaussian distribution about each
   # atom.
   key, subkey = jax.random.split(key)
@@ -436,19 +415,6 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
     seed = int(multihost_utils.broadcast_one_to_all(seed)[0])
   key = jax.random.PRNGKey(seed)
 
-  # extract number of electrons of each spin around each atom removed because
-  # of pseudopotentials
-  if cfg.system.pyscf_mol:
-    cfg.system.pyscf_mol.build()
-    core_electrons = {
-        atom: ecp_table[0]
-        for atom, ecp_table in cfg.system.pyscf_mol._ecp.items()  # pylint: disable=protected-access
-    }
-    ecp = cfg.system.pyscf_mol.ecp
-  else:
-    ecp = {}
-    core_electrons = {}
-
   # Create parameters, network, and vmaped/pmaped derivations
 
   if cfg.pretrain.method == 'hf' and cfg.pretrain.iterations > 0:
@@ -458,10 +424,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         nspins=nspins,
         restricted=False,
         basis=cfg.pretrain.basis,
-        ecp=ecp,
-        core_electrons=core_electrons,
-        states=cfg.system.states,
-        excitation_type=cfg.pretrain.get('excitation_type', 'ordered'))
+        states=cfg.system.states)
     # broadcast the result of PySCF from host 0 to all other hosts
     hartree_fock.mean_field.mo_coeff = multihost_utils.broadcast_one_to_all(
         hartree_fock.mean_field.mo_coeff
@@ -496,7 +459,6 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
   else:
     envelope = envelopes.make_isotropic_envelope()
 
-  use_complex = cfg.network.get('complex', False)
   if cfg.network.network_type == 'ferminet':
     network = networks.make_fermi_net(
         nspins,
@@ -510,7 +472,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         bias_orbitals=cfg.network.bias_orbitals,
         full_det=cfg.network.full_det,
         rescale_inputs=cfg.network.get('rescale_inputs', False),
-        complex_output=use_complex,
+        complex_output=cfg.network.get('complex', False),
         **cfg.network.ferminet,
     )
   elif cfg.network.network_type == 'psiformer':
@@ -525,7 +487,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         jastrow=cfg.network.get('jastrow', 'default'),
         bias_orbitals=cfg.network.bias_orbitals,
         rescale_inputs=cfg.network.get('rescale_inputs', False),
-        complex_output=use_complex,
+        complex_output=cfg.network.get('complex', False),
         **cfg.network.psiformer,
     )
   key, subkey = jax.random.split(key)
@@ -534,14 +496,9 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
   signed_network = network.apply
   # Often just need log|psi(x)|.
   if cfg.system.get('states', 0):
-    if cfg.optim.objective == 'vmc_overlap':
-      logabs_network = networks.make_state_trace(signed_network,
-                                                 cfg.system.states)
-    else:
-      logabs_network = utils.select_output(
-          networks.make_total_ansatz(signed_network,
-                                     cfg.system.get('states', 0),
-                                     complex_output=use_complex), 1)
+    logabs_network = utils.select_output(
+        networks.make_total_ansatz(signed_network,
+                                   cfg.system.get('states', 0)), 1)
   else:
     logabs_network = lambda *args, **kwargs: signed_network(*args, **kwargs)[1]
   batch_network = jax.vmap(
@@ -551,32 +508,12 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
   # Exclusively when computing the gradient wrt the energy for complex
   # wavefunctions, it is necessary to have log(psi) rather than log(|psi|).
   # This is unused if the wavefunction is real-valued.
-  if cfg.system.get('states', 0):
-    if cfg.optim.objective == 'vmc_overlap':
-      # In the case of a penalty method, we actually need all outputs
-      # to compute the gradient
-      log_network_for_loss = networks.make_state_matrix(signed_network,
-                                                        cfg.system.states)
-      def log_network(*args, **kwargs):
-        phase, mag = log_network_for_loss(*args, **kwargs)
-        return mag + 1.j * phase
-    else:
-      def log_network(*args, **kwargs):
-        if not use_complex:
-          raise ValueError('This function should never be used if the '
-                           'wavefunction is real-valued.')
-        meta_net = networks.make_total_ansatz(signed_network,
-                                              cfg.system.get('states', 0),
-                                              complex_output=True)
-        phase, mag = meta_net(*args, **kwargs)
-        return mag + 1.j * phase
-  else:
-    def log_network(*args, **kwargs):
-      if not use_complex:
-        raise ValueError('This function should never be used if the '
-                         'wavefunction is real-valued.')
-      phase, mag = signed_network(*args, **kwargs)
-      return mag + 1.j * phase
+  def log_network(*args, **kwargs):
+    if not cfg.network.get('complex', False):
+      raise ValueError('This function should never be used if the '
+                       'wavefunction is real-valued.')
+    phase, mag = signed_network(*args, **kwargs)
+    return mag + 1.j * phase
 
   # Set up checkpointing and restore params/data if necessary
   # Mirror behaviour of checkpoints in TF FermiNet.
@@ -606,15 +543,36 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
     key, subkey = jax.random.split(key)
     # make sure data on each host is initialized differently
     subkey = jax.random.fold_in(subkey, jax.process_index())
+    # extract number of electrons of each spin around each atom removed because
+    # of pseudopotentials
+    if cfg.system.pyscf_mol:
+      cfg.system.pyscf_mol.build()
+      core_electrons = {
+          atom: ecp_table[0]
+          for atom, ecp_table in cfg.system.pyscf_mol._ecp.items()  # pylint: disable=protected-access
+      }
+    else:
+      core_electrons = {}
+
     # create electron state (position and spin)
-    pos, spins = init_electrons(
+    if len(nspins) > 2:
+      # TODO (GC): This can certainly be more sophisticated.
+      logging.info('More than 2 spin species, assuming multi-component '
+                   'calculation and initializing naively.')
+      pos = jax.random.normal(
         subkey,
-        cfg.system.molecule,
-        cfg.system.electrons,
-        batch_size=total_host_batch_size,
-        init_width=cfg.mcmc.init_width,
-        core_electrons=core_electrons,
-    )
+        (host_batch_size, 3*sum(nspins))
+      )*cfg.mcmc.init_width
+      spins = jnp.empty(pos.shape)
+    else:
+      pos, spins = init_electrons(
+          subkey,
+          cfg.system.molecule,
+          cfg.system.electrons,
+          batch_size=total_host_batch_size,
+          init_width=cfg.mcmc.init_width,
+          core_electrons=core_electrons,
+      )
     # For excited states, each device has a batch of walkers, where each walker
     # is nstates * nelectrons. The vmap over nstates is handled in the function
     # created in make_total_ansatz
@@ -711,8 +669,6 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         electrons=cfg.system.electrons,
         scf_approx=hartree_fock,
         iterations=cfg.pretrain.iterations,
-        batch_size=device_batch_size,
-        scf_fraction=cfg.pretrain.get('scf_fraction', 0.0),
         states=cfg.system.states,
     )
 
@@ -723,6 +679,8 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
   mcmc_step = mcmc.make_mcmc_step(
       batch_network,
       device_batch_size,
+      nspins,
+      separate_spin_moves=cfg.mcmc.separate_spin_moves,
       steps=cfg.mcmc.steps,
       atoms=atoms_to_mcmc,
       blocks=cfg.mcmc.blocks * num_states,
@@ -733,14 +691,11 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
     if laplacian_method != 'default':
       raise NotImplementedError(f'Laplacian method {laplacian_method}'
                                 'not yet supported by custom local energy fns.')
-    if cfg.optim.objective == 'vmc_overlap':
-      raise NotImplementedError('Overlap penalty not yet supported for custom'
-                                'local energy fns.')
     local_energy_module, local_energy_fn = (
         cfg.system.make_local_energy_fn.rsplit('.', maxsplit=1))
     local_energy_module = importlib.import_module(local_energy_module)
     make_local_energy = getattr(local_energy_module, local_energy_fn)  # type: hamiltonian.MakeLocalEnergy
-    local_energy_fn = make_local_energy(
+    local_energy = make_local_energy(
         f=signed_network,
         charges=charges,
         nspins=nspins,
@@ -749,80 +704,34 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         **cfg.system.make_local_energy_kwargs)
   else:
     pp_symbols = cfg.system.get('pp', {'symbols': None}).get('symbols')
-    local_energy_fn = hamiltonian.local_energy(
+    local_energy = hamiltonian.local_energy(
         f=signed_network,
         charges=charges,
         nspins=nspins,
         use_scan=False,
-        complex_output=use_complex,
+        complex_output=cfg.network.get('complex', False),
         laplacian_method=laplacian_method,
         states=cfg.system.get('states', 0),
-        state_specific=(cfg.optim.objective == 'vmc_overlap'),
         pp_type=cfg.system.get('pp', {'type': 'ccecp'}).get('type'),
         pp_symbols=pp_symbols if cfg.system.get('use_pp') else None)
-
-  if cfg.optim.get('spin_energy', 0.0) > 0.0:
-    # Minimize <H + c * S^2> instead of just <H>
-    # Create a new local_energy function that takes the weighted sum of
-    # the local energy and the local spin magnitude.
-    local_s2_fn = observables.make_s2(
-        signed_network,
-        nspins=nspins,
-        states=cfg.system.states)
-    def local_energy_and_s2_fn(params, keys, data):
-      local_energy, aux_data = local_energy_fn(params, keys, data)
-      s2 = local_s2_fn(params, data, None)
-      weight = cfg.optim.get('spin_energy', 0.0)
-      if cfg.system.states:
-        aux_data = aux_data + weight * s2
-        local_energy_and_s2 = local_energy + weight * jnp.trace(s2)
-      else:
-        local_energy_and_s2 = local_energy + weight * s2
-      return local_energy_and_s2, aux_data
-    local_energy = local_energy_and_s2_fn
-  else:
-    local_energy = local_energy_fn
-
   if cfg.optim.objective == 'vmc':
     evaluate_loss = qmc_loss_functions.make_loss(
-        log_network if use_complex else logabs_network,
+        log_network if cfg.network.get('complex', False) else logabs_network,
         local_energy,
         clip_local_energy=cfg.optim.clip_local_energy,
         clip_from_median=cfg.optim.clip_median,
         center_at_clipped_energy=cfg.optim.center_at_clip,
-        complex_output=use_complex,
-        max_vmap_batch_size=cfg.optim.get('max_vmap_batch_size', 0),
+        complex_output=cfg.network.get('complex', False),
     )
   elif cfg.optim.objective == 'wqmc':
     evaluate_loss = qmc_loss_functions.make_wqmc_loss(
-        log_network if use_complex else logabs_network,
+        log_network if cfg.network.get('complex', False) else logabs_network,
         local_energy,
         clip_local_energy=cfg.optim.clip_local_energy,
         clip_from_median=cfg.optim.clip_median,
         center_at_clipped_energy=cfg.optim.center_at_clip,
-        complex_output=use_complex,
-        max_vmap_batch_size=cfg.optim.get('max_vmap_batch_size', 0),
-        vmc_weight=cfg.optim.get('vmc_weight', 1.0)
-    )
-  elif cfg.optim.objective == 'vmc_overlap':
-    if not cfg.system.states:
-      raise ValueError('Overlap penalty only works with excited states')
-    if cfg.optim.overlap.weights is None:
-      overlap_weight = tuple([1./(1.+x) for x in range(cfg.system.states)])
-      overlap_weight = tuple([x/sum(overlap_weight) for x in overlap_weight])
-    else:
-      assert len(cfg.optim.overlap.weights) == cfg.system.states
-      overlap_weight = cfg.optim.overlap.weights
-    evaluate_loss = qmc_loss_functions.make_energy_overlap_loss(
-        log_network_for_loss,
-        local_energy,
-        clip_local_energy=cfg.optim.clip_local_energy,
-        clip_from_median=cfg.optim.clip_median,
-        center_at_clipped_energy=cfg.optim.center_at_clip,
-        overlap_penalty=cfg.optim.overlap.penalty,
-        overlap_weight=overlap_weight,
         complex_output=cfg.network.get('complex', False),
-        max_vmap_batch_size=cfg.optim.get('max_vmap_batch_size', 0))
+    )
   else:
     raise ValueError(f'Not a recognized objective: {cfg.optim.objective}')
 
@@ -897,12 +806,18 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
   else:
     raise ValueError(f'Unknown optimizer: {optimizer}')
 
-  if mcmc_width_ckpt is not None:
-    mcmc_width = kfac_jax.utils.replicate_all_local_devices(mcmc_width_ckpt[0])
+  if cfg.mcmc.separate_spin_moves:
+    width_arr = jnp.ones((len(cfg.system.electrons),))*cfg.mcmc.move_width
+    mcmc_width = kfac_jax.utils.replicate_all_local_devices(width_arr)
+    pmoves = np.zeros((len(cfg.system.electrons), cfg.mcmc.adapt_frequency))
   else:
     mcmc_width = kfac_jax.utils.replicate_all_local_devices(
         jnp.asarray(cfg.mcmc.move_width))
-  pmoves = np.zeros(cfg.mcmc.adapt_frequency)
+    pmoves = np.zeros(cfg.mcmc.adapt_frequency)
+
+  # Avoid overwriting ckptd mcmc width
+  if mcmc_width_ckpt is not None:
+    mcmc_width = kfac_jax.utils.replicate_all_local_devices(mcmc_width_ckpt[0])
 
   if t_init == 0:
     logging.info('Burning in MCMC chain for %d steps', cfg.mcmc.burn_in)
@@ -935,25 +850,6 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
     logging.info('No optimizer provided. Assuming inference run.')
     logging.info('Setting initial iteration to 0.')
     t_init = 0
-
-    # Excited states inference only: rescale each state to be roughly
-    # comparable, to avoid large outlier values in the local energy matrix.
-    # This is not a factor in training, as the outliers are only off-diagonal.
-    # This only becomes a significant factor for systems with >25 electrons.
-    if cfg.system.states > 0 and 'state_scale' not in params:
-      state_matrix = utils.select_output(
-          networks.make_state_matrix(signed_network,
-                                     cfg.system.states), 1)
-      batch_state_matrix = jax.vmap(state_matrix, (None, 0, 0, 0, 0))
-      pmap_state_matrix = constants.pmap(batch_state_matrix)
-      log_psi_vals = pmap_state_matrix(
-          params, data.positions, data.spins, data.atoms, data.charges)
-      state_scale = np.mean(log_psi_vals, axis=[0, 1, 2])
-      state_scale = jax.experimental.multihost_utils.broadcast_one_to_all(
-          state_scale)
-      state_scale = np.tile(state_scale[None], [jax.local_device_count(), 1])
-      if isinstance(params, dict):  # Always true, but prevents type errors
-        params['state_scale'] = -state_scale  # pytype: disable=unsupported-operands
 
   if writer_manager is None:
     writer_manager = writers.Writer(
@@ -995,7 +891,14 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
 
       # Update MCMC move width
       mcmc_width, pmoves = mcmc.update_mcmc_width(
-          t, mcmc_width, cfg.mcmc.adapt_frequency, pmove, pmoves)
+          t, 
+          mcmc_width, 
+          cfg.mcmc.adapt_frequency, 
+          pmove, 
+          pmoves, 
+          separate_spin_moves=cfg.mcmc.separate_spin_moves
+      )
+      pmove = jnp.mean(pmove) if cfg.mcmc.separate_spin_moves else pmove      
 
       if cfg.debug.check_nan:
         tree = {'params': params, 'loss': loss}
