@@ -55,6 +55,17 @@ def setup_wandb(config={}, running_on_hpc=False):
   wandb_login(running_on_hpc=running_on_hpc)
   start_wandb_run(config=config, project_name="ferminet")
 
+def store_last_gradient():
+    """Transformation that remembers the most recent gradient."""
+    def init_fn(params):
+        return None  # no gradient yet
+
+    def update_fn(updates, state, params=None):
+        new_state = updates  # store the last gradient
+        return updates, new_state
+
+    return optax.GradientTransformation(init_fn, update_fn)
+
 
 def _assign_spin_configuration(
     nalpha: int, nbeta: int, batch_size: int = 1
@@ -265,7 +276,7 @@ def make_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
 
 
 def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
-                         optimizer: MinSR, batch_network) -> OptUpdate:
+                         optimizer, batch_network) -> OptUpdate:
   """Returns an OptUpdate function for performing a parameter update."""
 
   # Differentiate wrt parameters (argument 0)
@@ -276,8 +287,9 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
       data: networks.FermiNetData,
       opt_state: Optional[optax.OptState],
       key: chex.PRNGKey,
-      type = 'sr',
-      solver = 'cg'
+      ntk=False,
+      ntk_solver='cg',
+      centre_gradients=True
   ) -> OptUpdateResults:
     """Evaluates the loss and gradients and updates the parameters using optax."""
 
@@ -299,42 +311,42 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
     def fisher_matmul(
         v, centre_gradients=True, damping=1e-2):
       
-      if type == 'sr':
-        log_psi_jac_v = jvp_func(v)
-        update_vector = vjp_func(log_psi_jac_v / batch_size)
-      
-      elif type == 'minsr':
+      if ntk:
         log_psi_jac_v = vjp_func(v)
         update_vector =  jvp_func(v) / batch_size
-
+        
+      else:
+        log_psi_jac_v = jvp_func(v)
+        update_vector = vjp_func(log_psi_jac_v / batch_size)
+        
       if centre_gradients:
           update_vector -= jnp.mean(update_vector)
       
       update_vector += damping * v
       return update_vector
     
-    if type == 'sr':
-      grads = jax.scipy.sparse.linalg.cg(
-        fisher_matmul, flat_grads, x0=flat_grads, maxiter=100)[0]
-    else:
-      if solver =='cg':
-        grads = jvp_func(
-          jax.scipy.sparse.linalg.cg(
-          fisher_matmul, energies)[0]
-        )
-      elif solver == 'linear':
-        grads = jvp_func(jax.lax.custom_linear_solve(
-          fisher_matmul, energies)[0]
+    if ntk:
+      if ntk_solver =='cg':
+        grads = vjp_func(jax.scipy.sparse.linalg.cg(
+          fisher_matmul, energies)[0])
+      elif ntk_solver == 'linear':
+        grads = vjp_func(jax.lax.custom_linear_solve(
+          fisher_matmul, energies, solve=jax.numpy.linalg.solve)[0]
         )
       else:
+        logging.ERROR("Not implemented solver for ntk optimizer")
         return params, opt_state, loss, aux_data
+    else:
+      #x0 = opt_state[0]  # Using previous grad as guess - have to handle pmapping first
+      x0 = flat_grads  # Using loss grads as guess        
+      grads = jax.scipy.sparse.linalg.cg(
+        fisher_matmul, flat_grads, x0=x0, maxiter=100)[0]
 
     grads = constants.pmean(grads)  # Handling for multi-gpu
-    updates, opt_state = optimizer.update(grads, opt_state, params)
+    updates, opt_state = optimizer.update(  
+      unravel_fn(grads), opt_state, params)
     new_params = optax.apply_updates(params, updates)
 
-    #new_flat_params = flat_params - optimizer.lr * grads
-    #new_params = unravel_fn(new_flat_params)
     return new_params, opt_state, loss, aux_data
 
   return opt_update
@@ -1023,14 +1035,20 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
 
   elif cfg.optim.optimizer == 'minsr':
     optimizer = optax.chain(
+        store_last_gradient(),
         optax.scale_by_schedule(learning_rate_schedule),
-        optax.scale(-1.))
-    sr_object = 
-    #optimizer = MinSR(
-    #  lr=0.05,
-    #  damping=1e-4,
-    #  adaptive_step=False
-    #)
+        optax.scale(-1.),)
+    
+    """TODO: Add once I've implemented Optax into the optimizer class for SR
+    opt_state = MinSR(
+        ntk=cfg.optim.sr.ntk,
+        damping=cfg.optim.sr.damping,
+        centre_gradients=cfg.optim.sr.centre_gradients,
+        ntk_solver=cfg.optim.sr.ntk_solver,
+        preconditioning=cfg.optim.sr.preconditioning,
+        preset_guess=cfg.optim.sr.preset_guess
+    )
+    """
   else:
     raise ValueError(f'Not a recognized optimizer: {cfg.optim.optimizer}')
 
@@ -1043,10 +1061,19 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
     # optax/optax-compatible optimizer (ADAM, LAMB, ...)
     opt_state = jax.pmap(optimizer.init)(params)
     opt_state = opt_state_ckpt or opt_state  # avoid overwriting ckpted state
-    step = make_training_step(
+
+    if cfg.optim.optimizer == 'minsr':  # For now while I'm using optax
+      step = make_minsr_training_step(
         mcmc_step=mcmc_step,
-        optimizer_step=make_opt_update_step(evaluate_loss, optimizer),
-        reset_if_nan=cfg.optim.reset_if_nan)
+        optimizer_step=make_minsr_opt_update_step(
+          evaluate_loss, optimizer, batch_network),
+        reset_if_nan=cfg.optim.reset_if_nan,
+        logabs_network=logabs_network)
+    else:
+      step = make_training_step(
+          mcmc_step=mcmc_step,
+          optimizer_step=make_opt_update_step(evaluate_loss, optimizer),
+          reset_if_nan=cfg.optim.reset_if_nan)
   elif isinstance(optimizer, kfac_jax.Optimizer):
     step = make_kfac_training_step(
         mcmc_step=mcmc_step,
@@ -1054,8 +1081,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
         optimizer=optimizer,
         reset_if_nan=cfg.optim.reset_if_nan)
     
-  elif isinstance(optimizer, MinSR):
-    opt_state = None
+  elif cfg.optim.optimizer == 'minsr':
     step = make_minsr_training_step(
         mcmc_step=mcmc_step,
         optimizer_step=make_minsr_opt_update_step(
@@ -1131,7 +1157,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
         iteration_key=None,
         log=False)
 
-  #return evaluate_loss, mcmc_step, sharded_key, data, params, mcmc_width, logabs_network
+  return evaluate_loss, mcmc_step, sharded_key, data, params, mcmc_width, logabs_network
   with writer_manager as writer:
     # Main training loop
     num_resets = 0  # used if reset_if_nan is true

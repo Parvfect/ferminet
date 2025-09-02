@@ -1,9 +1,13 @@
 
+from ferminet.networks import ParamTree
 
-class SR:
+
+class MinSR:
+
+    velocities: ParamTree  # Previous updates to the parameters
 
     def __init__(
-            self, ntk=False, damping=1e-4, centre_gradients=True, ntk_solver = 'linear', preconditioning = False, preset_guess = 'loss'):
+            self, ntk=False, damping=1e-4, centre_gradients=True, ntk_solver='linear', preconditioning=False, preset_guess='loss'):
         self.ntk = ntk
         self.damping = damping
         self.centre_gradients = centre_gradients
