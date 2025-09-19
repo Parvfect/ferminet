@@ -32,3 +32,8 @@ pmean = functools.partial(
     kfac_jax.utils.pmean_if_pmap, axis_name=PMAP_AXIS_NAME)
 all_gather = functools.partial(kfac_jax.utils.wrap_if_pmap(jax.lax.all_gather),
                                axis_name=PMAP_AXIS_NAME)
+
+ELECTRON_MASS = 1.
+MUON_MASS = 206.7682827
+PROTON_MASS = 1836.152673426
+NEUTRON_MASS = 1838.68366200

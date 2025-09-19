@@ -79,15 +79,20 @@ KineticEnergy = Callable[
 
 def local_kinetic_energy(
     f: networks.FermiNetLike,
+    nspins: Sequence[int],
+    particle_masses: Sequence[float],
     use_scan: bool = False,
     complex_output: bool = False,
     laplacian_method: str = 'default',
+    ndim: int = 3
 ) -> KineticEnergy:
   r"""Creates a function to for the local kinetic energy, -1/2 \nabla^2 ln|f|.
 
   Args:
     f: Callable which evaluates the wavefunction as a
       (sign or phase, log magnitude) tuple.
+    nspins: Number of particles per species, shape (nspecies,)
+    particle_masses: Sequence of shape (nspecies,) with the mass of each species
     use_scan: Whether to use a `lax.scan` for computing the laplacian.
     complex_output: If true, the output of f is complex-valued.
     laplacian_method: Laplacian calculation method. One of:
@@ -101,6 +106,9 @@ def local_kinetic_energy(
 
   phase_f = utils.select_output(f, 0)
   logabs_f = utils.select_output(f, 1)
+
+  particle_masses = jnp.repeat(particle_masses, nspins)
+  particle_masses = jnp.repeat(particle_masses, ndim)
 
   if laplacian_method == 'default':
 
@@ -127,22 +135,22 @@ def local_kinetic_energy(
 
       if use_scan:
         _, diagonal = lax.scan(
-            lambda i, _: (i + 1, hessian_diagonal(i)), 0, None, length=n)
+            lambda i, _: (i + 1, hessian_diagonal(i) / particle_masses[i]), 0, None, length=n)
         result = -0.5 * jnp.sum(diagonal)
       else:
         result = -0.5 * lax.fori_loop(
-            0, n, lambda i, val: val + hessian_diagonal(i), 0.0)
-      result -= 0.5 * jnp.sum(primal ** 2)
+            0, n, lambda i, val: val + hessian_diagonal(i) / particle_masses[i], 0.0)
+      result -= 0.5 * jnp.sum((primal ** 2) / particle_masses)
       if complex_output:
-        result += 0.5 * jnp.sum(phase_primal ** 2)
-        result -= 1.j * jnp.sum(primal * phase_primal)
+        result += 0.5 * jnp.sum((phase_primal ** 2) / particle_masses)
+        result -= 1.j * jnp.sum(primal * phase_primal / particle_masses)
       return result
 
   elif laplacian_method == 'folx':
     def _lapl_over_f(params, data):
       f_closure = lambda x: f(params, x, data.spins, data.atoms, data.charges)
       f_wrapped = folx.forward_laplacian(f_closure, sparsity_threshold=6)
-      output = f_wrapped(data.positions)
+      output = f_wrapped(data.positions, weights=(1/jnp.sqrt(particle_masses),))
       result = - (output[1].laplacian +
                   jnp.sum(output[1].jacobian.dense_array ** 2)) / 2
       if complex_output:
@@ -263,7 +271,8 @@ def excited_kinetic_energy_matrix(
   return _lapl_over_f
 
 
-def potential_electron_electron(r_ee: Array) -> jnp.ndarray:
+def potential_electron_electron(r_ee: Array,
+  individual_charges: Array) -> jnp.ndarray:
   """Returns the electron-electron potential.
 
   Args:
@@ -271,11 +280,12 @@ def potential_electron_electron(r_ee: Array) -> jnp.ndarray:
       between electrons i and j. Other elements in the final axes are not
       required.
   """
-  r_ee = r_ee[jnp.triu_indices_from(r_ee[..., 0], 1)]
-  return (1.0 / r_ee).sum()
+  charge_prod = individual_charges[None, ...] * individual_charges[..., None]  # Matrix of charge products
 
+  pot = (charge_prod[..., None] / r_ee)[jnp.triu_indices_from(r_ee[..., 0], 1)]  # Avoid double counting - get upper triangle of matrix
+  return pot.sum()
 
-def potential_electron_nuclear(charges: Array, r_ae: Array) -> jnp.ndarray:
+def potential_electron_nuclear(charges: Array, r_ae: Array, individual_charges: Array) -> jnp.ndarray:
   """Returns the electron-nuclearpotential.
 
   Args:
@@ -283,7 +293,7 @@ def potential_electron_nuclear(charges: Array, r_ae: Array) -> jnp.ndarray:
     r_ae: Shape (nelectrons, natoms). r_ae[i, j] gives the distance between
       electron i and atom j.
   """
-  return -jnp.sum(charges / r_ae[..., 0])
+  return -jnp.sum(charges[None, ...] * individual_charges[..., None] / r_ae[..., 0])
 
 
 def potential_nuclear_nuclear(charges: Array, atoms: Array) -> jnp.ndarray:
@@ -299,7 +309,8 @@ def potential_nuclear_nuclear(charges: Array, atoms: Array) -> jnp.ndarray:
 
 
 def potential_energy(r_ae: Array, r_ee: Array, atoms: Array,
-                     charges: Array) -> jnp.ndarray:
+                    charges: Array, particle_charges:Array,
+                    nspins: Sequence[int]) -> jnp.ndarray:
   """Returns the potential energy for this electron configuration.
 
   Args:
@@ -311,8 +322,9 @@ def potential_energy(r_ae: Array, r_ee: Array, atoms: Array,
     atoms: Shape (natoms, ndim). Positions of the atoms.
     charges: Shape (natoms). Nuclear charges of the atoms.
   """
-  return (potential_electron_electron(r_ee) +
-          potential_electron_nuclear(charges, r_ae) +
+  individual_charges = jnp.repeat(particle_charges, nspins)
+  return (potential_electron_electron(r_ee, individual_charges) +
+          potential_electron_nuclear(charges, r_ae, individual_charges) +
           potential_nuclear_nuclear(charges, atoms))
 
 
@@ -320,6 +332,9 @@ def local_energy(
     f: networks.FermiNetLike,
     charges: jnp.ndarray,
     nspins: Sequence[int],
+    particle_charges: Sequence[int],
+    particle_masses: Sequence[float],
+    ndim: int = 3,
     use_scan: bool = False,
     complex_output: bool = False,
     laplacian_method: str = 'default',
@@ -355,7 +370,10 @@ def local_energy(
     energy of the wavefunction given the parameters params, RNG state key,
     and a single MCMC configuration in data.
   """
-  del nspins
+
+  particle_charges = jnp.asarray(particle_charges)
+  particle_masses = jnp.asarray(particle_masses)
+  nspins = jnp.asarray(nspins)
 
   if not pp_symbols:
     effective_charges = charges
@@ -438,13 +456,16 @@ def local_energy(
         total_energy = jnp.trace(energy_mat)
     else:
       ke = local_kinetic_energy(f,
+                                nspins=nspins,
+                                particle_masses=particle_masses,
                                 use_scan=use_scan,
                                 complex_output=complex_output,
                                 laplacian_method=laplacian_method)
       ae, _, r_ae, r_ee = networks.construct_input_features(
-          data.positions, data.atoms
+          data.positions, data.atoms, ndim
       )
-      potential = (potential_energy(r_ae, r_ee, data.atoms, effective_charges) +
+      potential = (potential_energy(r_ae, r_ee, data.atoms, effective_charges,
+                                    particle_charges, nspins) +
                    pp_local(r_ae) +
                    pp_nonlocal(key, f, params, data, ae, r_ae))
       kinetic = ke(params, data)

@@ -37,6 +37,9 @@ from ferminet.utils import statistics
 from ferminet.utils import system
 from ferminet.utils import utils
 from ferminet.utils import writers
+from ferminet.training_monitoring import \
+  wandb_login, start_wandb_run
+from ferminet.visual_tools import plot_electron_histograms
 import jax
 from jax.experimental import multihost_utils
 import jax.numpy as jnp
@@ -45,16 +48,93 @@ import ml_collections
 import numpy as np
 import optax
 from typing_extensions import Protocol
+import wandb
 
 
+def setup_wandb(config={}, running_on_hpc=False):
+  # Training monitoring on wandb
+  wandb_login(running_on_hpc=running_on_hpc)
+  start_wandb_run(config=config, project_name="ferminet")
+
+"""
 def _assign_spin_configuration(
     nalpha: int, nbeta: int, batch_size: int = 1
 ) -> jnp.ndarray:
-  """Returns the spin configuration for a fixed spin polarisation."""
+  #Returns the spin configuration for a fixed spin polarisation.
   spins = jnp.concatenate((jnp.ones(nalpha), -jnp.ones(nbeta)))
   return jnp.tile(spins[None], reps=(batch_size, 1))
+"""
+  
+def _assign_spin_configuration(
+    particles: int, batch_size: int = 1
+) -> jnp.ndarray:
+  """Returns the spin configuration for a fixed spin polarisation."""
+  spin_values = [1. if i % 2 == 0 else -1. for i in range(len(particles))]
+  spins = jnp.concatenate(
+    [jnp.full(count, value) for count, value in zip(particles, spin_values)])
+  return jnp.tile(spins[None], reps=(batch_size, 1))
 
+# Andres method copy-pasted
 
+def init_electrons(  # pylint: disable=dangerous-default-value
+    key,
+    molecule: Sequence[system.Atom],
+    electrons: Sequence[int],
+    ndim: int,
+    batch_size: int,
+    init_width: float,
+    core_electrons: Mapping[str, int] = {},
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+  """Initializes electron positions around each atom.
+
+  Args:
+    key: JAX RNG state.
+    molecule: system.Atom objects making up the molecule.
+    electrons: tuple of number of alpha and beta electrons.
+    ndim: number of dimensions
+    batch_size: total number of MCMC configurations to generate across all
+      devices.
+    init_width: width of (atom-centred) Gaussian used to generate initial
+      electron configurations.
+    core_electrons: mapping of element symbol to number of core electrons
+      included in the pseudopotential.
+
+  Returns:
+    array of (batch_size, (nalpha+nbeta)*ndim) of initial (random) electron
+    positions in the initial MCMC configurations and ndim is the dimensionality
+    of the space (i.e. typically 3), and array of (batch_size, (nalpha+nbeta))
+    of spin configurations, where 1 and -1 indicate alpha and beta electrons
+    respectively.
+  """
+
+  atomic_charges = jnp.array([atom.charge for atom in molecule])
+  if len(atomic_charges) == 1:
+    electron_positions = jnp.tile(jnp.asarray(molecule[0].coords), sum(electrons))
+    electron_positions = jnp.tile(electron_positions, (batch_size, 1))
+  else:
+    if sum(atomic_charges) == 0:
+      raise ValueError("If there are no charged atoms, please add only one neutral atom")
+    
+    atomic_positions = jnp.array([atom.coords for atom in molecule])
+
+    key, subkey = jax.random.split(key)
+    inds = jax.random.choice(subkey, len(molecule), shape=(batch_size, sum(electrons)), p=atomic_charges)
+
+    electron_positions = atomic_positions[inds].reshape(batch_size, sum(electrons) * ndim)
+
+  key, subkey = jax.random.split(key)
+  electron_positions += (
+      jax.random.normal(subkey, shape=electron_positions.shape)
+      * init_width
+  )
+
+  electron_spins = _assign_spin_configuration(
+      electrons, batch_size
+  )
+
+  return electron_positions, electron_spins
+
+"""
 def init_electrons(  # pylint: disable=dangerous-default-value
     key,
     molecule: Sequence[system.Atom],
@@ -64,7 +144,8 @@ def init_electrons(  # pylint: disable=dangerous-default-value
     core_electrons: Mapping[str, int] = {},
     max_iter: int = 10_000,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-  """Initializes electron positions around each atom.
+  
+  Initializes electron positions around each atom.
 
   Args:
     key: JAX RNG state.
@@ -86,7 +167,8 @@ def init_electrons(  # pylint: disable=dangerous-default-value
     of the space (i.e. typically 3), and array of (batch_size, (nalpha+nbeta))
     of spin configurations, where 1 and -1 indicate alpha and beta electrons
     respectively.
-  """
+  
+  
   niter = 0
   total_electrons = sum(atom.charge - core_electrons.get(atom.symbol, 0)
                         for atom in molecule)
@@ -145,7 +227,7 @@ def init_electrons(  # pylint: disable=dangerous-default-value
   )
 
   return electron_positions, electron_spins
-
+"""
 
 # All optimizer states (KFAC and optax-based).
 OptimizerState = Union[optax.OptState, kfac_jax.Optimizer.State]
@@ -413,6 +495,13 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
   device_batch_size = host_batch_size // num_devices  # batch size per device
   data_shape = (num_devices, device_batch_size)
 
+
+  # Wandb logging
+  if cfg.log.wandb:
+    setup_wandb(
+      running_on_hpc=False, config=cfg.to_dict())
+
+
   # Check if mol is a pyscf molecule and convert to internal representation
   if cfg.system.pyscf_mol:
     cfg.update(
@@ -421,13 +510,27 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
   # Convert mol config into array of atomic positions and charges
   atoms = jnp.stack([jnp.array(atom.coords) for atom in cfg.system.molecule])
   charges = jnp.array([atom.charge for atom in cfg.system.molecule])
-  nspins = cfg.system.electrons
+  nspins = cfg.system.particles
 
   # Generate atomic configurations for each walker
   batch_atoms = jnp.tile(atoms[None, ...], [device_batch_size, 1, 1])
   batch_atoms = kfac_jax.utils.replicate_all_local_devices(batch_atoms)
   batch_charges = jnp.tile(charges[None, ...], [device_batch_size, 1])
   batch_charges = kfac_jax.utils.replicate_all_local_devices(batch_charges)
+
+  # Define default values for particle masses and charges
+  n_particles = len(cfg.system.particles)
+
+  default_particle_masses = [constants.ELECTRON_MASS for i in range(len(cfg.system.particles))] 
+  default_particle_charges = [-1 for i in range(len(cfg.system.particles)) ]
+
+  # Check if particle masses and charges have been defined
+  # If they have not been defined, use default ones
+  if cfg.system.get("charges", None) == tuple():
+    cfg.system.charges = default_particle_charges[:len(cfg.system.particles)]
+
+  if cfg.system.get("masses", None) == tuple():
+    cfg.system.masses = default_particle_masses[:len(cfg.system.particles)]
 
   if cfg.debug.deterministic:
     seed = 23
@@ -476,13 +579,13 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
     )
     feature_layer = make_feature_layer(
         natoms=charges.shape[0],
-        nspins=cfg.system.electrons,
+        nspins=cfg.system.particles,
         ndim=cfg.system.ndim,
         **cfg.network.make_feature_layer_kwargs)
   else:
     feature_layer = networks.make_ferminet_features(
         natoms=charges.shape[0],
-        nspins=cfg.system.electrons,
+        nspins=cfg.system.particles,
         ndim=cfg.system.ndim,
         rescale_inputs=cfg.network.get('rescale_inputs', False),
     )
@@ -610,11 +713,14 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
     pos, spins = init_electrons(
         subkey,
         cfg.system.molecule,
-        cfg.system.electrons,
+        cfg.system.particles,
+        ndim=cfg.system.ndim,
         batch_size=total_host_batch_size,
         init_width=cfg.mcmc.init_width,
         core_electrons=core_electrons,
     )
+
+    
     # For excited states, each device has a batch of walkers, where each walker
     # is nstates * nelectrons. The vmap over nstates is handled in the function
     # created in make_total_ansatz
@@ -708,7 +814,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         batch_orbitals=batch_orbitals,
         network_options=network.options,
         sharded_key=subkeys,
-        electrons=cfg.system.electrons,
+        electrons=cfg.system.particles,
         scf_approx=hartree_fock,
         iterations=cfg.pretrain.iterations,
         batch_size=device_batch_size,
@@ -752,6 +858,8 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
     local_energy_fn = hamiltonian.local_energy(
         f=signed_network,
         charges=charges,
+        particle_charges=cfg.system.charges,
+        particle_masses=cfg.system.masses,
         nspins=nspins,
         use_scan=False,
         complex_output=use_complex,
@@ -962,6 +1070,9 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         directory=ckpt_save_path,
         iteration_key=None,
         log=False)
+ 
+  batch_network_pmapped = constants.pmap(batch_network)
+  #return mcmc_step, logabs_network, batch_network, sharded_key, data, params
   with writer_manager as writer:
     # Main training loop
     num_resets = 0  # used if reset_if_nan is true
@@ -1040,6 +1151,34 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
             logging_args += obs_data,
         logging.info(logging_str, *logging_args)
         writer.write(t, **writer_kwargs)
+
+        if cfg.log.wandb:
+          metrics = {
+                "mean_energy": loss,
+                "variance": weighted_stats.variance,
+                "pmove": pmove
+            }
+          wandb.log(metrics)
+
+      if t % cfg.log.log_frequency == 0 and cfg.log.wandb:
+
+        # Visual data
+        batch_network_output = batch_network_pmapped(
+          params, data.positions, data.spins, data.atoms, data.charges)
+        pos = data.positions
+        prob_density = jnp.exp(batch_network_output)
+        img_array = plot_electron_histograms(
+          pos, prob_density)
+
+        # wandb logging
+        images = wandb.Image(
+          img_array, caption=f"Epoch {t}")
+        
+        metrics = {
+                "plots": images
+            }
+
+        wandb.log(metrics)
 
       # Log data about observables too big to fit in a CSV
       if cfg.system.states:

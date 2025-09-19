@@ -46,7 +46,7 @@ def adjust_nuclear_charge(cfg):
   else:
     cfg.system.molecule = [atom]
 
-  if not cfg.system.electrons:
+  if not cfg.system.particles:
     atomic_number = elements.SYMBOLS[atom.symbol].atomic_number
     if 'charge' in cfg.system:
       atomic_number -= cfg.system.charge
@@ -56,7 +56,7 @@ def adjust_nuclear_charge(cfg):
     else:
       spin_polarisation = elements.ATOMIC_NUMS[atomic_number].spin_config
     nalpha = (atomic_number + spin_polarisation) // 2
-    cfg.system.electrons = (nalpha, atomic_number - nalpha)
+    cfg.system.particles = (nalpha, atomic_number - nalpha)
 
   return cfg
 

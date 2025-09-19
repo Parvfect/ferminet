@@ -122,7 +122,8 @@ def default() -> ml_collections.ConfigDict:
           },
       },
       'log': {
-          'stats_frequency': 1,  # iterations between logging of stats
+          'stats_frequency': 1.0,  # iterations between logging of stats
+          'log_frequency': 50.0,  # iterations between visual logging
           'save_frequency': 10.0,  # minutes between saving network params
           # Path to save/restore network to/from. If falsy,
           # creates a timestamped directory in the working directory.
@@ -141,6 +142,7 @@ def default() -> ml_collections.ConfigDict:
           # wavefunction dependent on using log_energy mode or not for each
           # walker at each step
           'features': False,
+          'wandb': False,
       },
       'system': {
           'type': SystemType.MOLECULE.value,
@@ -149,9 +151,11 @@ def default() -> ml_collections.ConfigDict:
           # list of system.Atom objects with element type and position.
           'molecule': config_dict.placeholder(list),
           # number of spin up, spin-down electrons
-          'electrons': tuple(),
+          'particles': tuple(),
           # Dimensionality. Change with care. FermiNet implementation currently
           # assumes 3D systems.
+          'charges': tuple(),
+          'masses': tuple(),
           'ndim': 3,
           # Number of excited states. If 0, use normal ground state machinery.
           # If 1, compute ground state using excited state machinery. If >1,
