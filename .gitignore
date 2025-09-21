@@ -1,5 +1,9 @@
 *.pyc
 *.egg-info
 *.csv
+*.txt
 *.npz
 **/env
+**/pretrained
+**/wandb
+**/.ipynb_checkpoints

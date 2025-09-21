@@ -8,10 +8,10 @@ def get_config():
     # Get default options.
     cfg = base_config.default()
     # Set up molecule
-    cfg.system.electrons = (3, 2, 1)
+    cfg.system.electrons = (10, 10, 1)
     cfg.system.molecule = [
-        system.Atom("Li", [0., 0., 0.], units='bohr'), 
-        system.Atom("He", [5.051, 0., 0.], units='bohr')
+        system.Atom("F", [0., 0., 0.], units='bohr'), 
+        system.Atom("F", [5.051, 0., 0.], units='bohr')
     ]
     # Set up positronic Hamiltonian. Indices of `fermion_charges` correspond to
     # indices of `cfg.system.electrons`

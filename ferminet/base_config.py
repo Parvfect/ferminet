@@ -101,8 +101,10 @@ def default() -> ml_collections.ConfigDict:
           },
       },
       'log': {
+          'wandb': True,
           'stats_frequency': 1,  # iterations between logging of stats
-          'save_frequency': 10.0,  # minutes between saving network params
+          'log_frequency': 50,
+          'save_frequency': 1.0,  # minutes between saving network params
           # Path to save/restore network to/from. If falsy,
           # creates a timestamped directory in the working directory.
           'save_path': '',

@@ -45,7 +45,16 @@ import ml_collections
 import numpy as np
 import optax
 from typing_extensions import Protocol
+import wandb
+from ferminet.training_monitoring import \
+  wandb_login, start_wandb_run
+from ferminet.visual_tools import plot_electron_histograms, plot_combined_electron_positions, plot_electron_presence_map
 
+
+def setup_wandb(config={}, running_on_hpc=False):
+  # Training monitoring on wandb
+  wandb_login(running_on_hpc=running_on_hpc)
+  start_wandb_run(config=config, project_name="ferminet")
 
 def _assign_spin_configuration(
     nalpha: int, nbeta: int, batch_size: int = 1
@@ -396,6 +405,11 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
   if cfg.system.pyscf_mol:
     cfg.update(
         system.pyscf_mol_to_internal_representation(cfg.system.pyscf_mol))
+    
+  # Wandb logging
+  if cfg.log.wandb:
+    setup_wandb(
+      running_on_hpc=False, config=cfg.to_dict())
 
   # Convert mol config into array of atomic positions and charges
   atoms = jnp.stack([jnp.array(atom.coords) for atom in cfg.system.molecule])
@@ -858,6 +872,9 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         directory=ckpt_save_path,
         iteration_key=None,
         log=False)
+    
+  batch_network_pmapped = constants.pmap(batch_network)
+  #return mcmc_step, logabs_network, batch_network, sharded_key, data, params
   with writer_manager as writer:
     # Main training loop
     num_resets = 0  # used if reset_if_nan is true
@@ -943,6 +960,37 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
             logging_args += obs_data,
         logging.info(logging_str, *logging_args)
         writer.write(t, **writer_kwargs)
+        if cfg.log.wandb:
+          metrics = {
+                "mean_energy": loss,
+                "variance": weighted_stats.variance,
+                "pmove": pmove
+            }
+          wandb.log(metrics)
+
+      if t % cfg.log.log_frequency == 0 and cfg.log.wandb:
+
+        # Visual data
+        batch_network_output = batch_network_pmapped(
+          params, data.positions, data.spins, data.atoms, data.charges)
+        pos = data.positions
+        prob_density = jnp.exp(batch_network_output)
+        img_array = plot_electron_histograms(
+          pos, prob_density)
+        combined_img_array = plot_electron_presence_map(pos)
+
+        # wandb logging
+        indv_images = wandb.Image(
+          img_array, caption=f"Epoch {t}")
+        combined_img = wandb.Image(
+          combined_img_array, caption=f"Epoch {t}")
+        metrics = {
+                "indv_plots": indv_images,
+                "full_plot": combined_img
+            }
+
+        wandb.log(metrics)
+
 
       # Log data about observables too big to fit in a CSV
       if cfg.system.states:
@@ -960,6 +1008,15 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
       if time.time() - time_of_last_ckpt > cfg.log.save_frequency * 60:
         checkpoint.save(ckpt_save_path, t, data, params, opt_state, mcmc_width)
         time_of_last_ckpt = time.time()
+
+      # Visual data
+      #batch_network_output = batch_network_pmapped(params, data.positions, data.spins, data.atoms, data.charges)
+      #pos = data.positions
+      #print(pos.shape)
+      #prob_density = jnp.exp(batch_network_output) ** 2
+      #print(prob_density)
+      #print(jnp.sum(prob_density))
+      
 
     # Shut down logging at end
     if cfg.system.states:
