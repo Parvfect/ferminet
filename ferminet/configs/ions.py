@@ -8,7 +8,7 @@ def get_config():
     # Get default options.
     cfg = base_config.default()
     # Set up molecule
-    cfg.system.electrons = (5, 5)
+    cfg.system.electrons = (9, 9)
     cfg.system.molecule = [
         system.Atom("Cl", [0., 0., 0.], units='bohr'), 
     ]
