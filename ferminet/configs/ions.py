@@ -10,10 +10,10 @@ def get_config():
     # Set up molecule
     cfg.system.electrons = (5, 5)
     cfg.system.molecule = [
-        system.Atom("F", [0., 0., 0.], units='bohr'), 
+        system.Atom("Cl", [0., 0., 0.], units='bohr'), 
     ]
     # Set up positronic Hamiltonian. Indices of `fermion_charges` correspond to
-    # indices of `cfg.system.electrons`
+    # indices of `cfg.system.electrons
     cfg.system.make_local_energy_fn = \
       'ferminet.positrons.hamiltonian.local_energy'
     cfg.system.make_local_energy_kwargs = {
