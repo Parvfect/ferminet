@@ -11,7 +11,7 @@ def get_config():
     cfg.system.electrons = (10, 10, 1)
     cfg.system.molecule = [
         system.Atom("F", [0., 0., 0.], units='bohr'), 
-        system.Atom("F", [5.051, 0., 0.], units='bohr')
+        system.Atom("F", [3.051, 0., 0.], units='bohr')
     ]
     # Set up positronic Hamiltonian. Indices of `fermion_charges` correspond to
     # indices of `cfg.system.electrons`
