@@ -412,11 +412,6 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
     cfg.system.molecule[1].coords = [
       float(cfg.system.atomic_distance), 0., 0.]
 
-  # Wandb logging
-  if cfg.log.wandb:
-    setup_wandb(
-      running_on_hpc=False, config=cfg.to_dict())
-
   # Convert mol config into array of atomic positions and charges
   atoms = jnp.stack([jnp.array(atom.coords) for atom in cfg.system.molecule])
   charges = jnp.array([atom.charge for atom in cfg.system.molecule])
@@ -549,6 +544,11 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
   ckpt_restore_filename = (
       checkpoint.find_last_checkpoint(ckpt_save_path) or
       checkpoint.find_last_checkpoint(ckpt_restore_path))
+  
+  # Wandb logging
+  if cfg.log.wandb:
+    setup_wandb(
+      running_on_hpc=False, config=cfg.to_dict())
 
   if ckpt_restore_filename:
     (t_init,
