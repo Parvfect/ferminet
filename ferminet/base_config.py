@@ -103,7 +103,7 @@ def default() -> ml_collections.ConfigDict:
       'log': {
           'wandb': True,
           'stats_frequency': 1,  # iterations between logging of stats
-          'log_frequency': 50,
+          'log_frequency': 200,
           'save_frequency': 1.0,  # minutes between saving network params
           # Path to save/restore network to/from. If falsy,
           # creates a timestamped directory in the working directory.
@@ -172,6 +172,8 @@ def default() -> ml_collections.ConfigDict:
           'make_local_energy_fn': '',
           # Additional kwargs to pass into make_local_energy_fn.
           'make_local_energy_kwargs': {},
+          'atomic_distance': 0.0,
+          # Overwriting for dihalide systems to sweep over configurations
       },
       'mcmc': {
           # Note: HMC options are not currently used.

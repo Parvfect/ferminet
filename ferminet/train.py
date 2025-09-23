@@ -405,7 +405,13 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
   if cfg.system.pyscf_mol:
     cfg.update(
         system.pyscf_mol_to_internal_representation(cfg.system.pyscf_mol))
-    
+  
+  # If sweeping for dihalide systems - overwrite position coordinates
+  if cfg.system.atomic_distance > 0:
+    # Write second molecule x coordinate at that distance
+    cfg.system.molecule[1].coords = [
+      float(cfg.system.atomic_distance), 0., 0.]
+
   # Wandb logging
   if cfg.log.wandb:
     setup_wandb(
