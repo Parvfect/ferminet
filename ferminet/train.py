@@ -33,6 +33,7 @@ from ferminet import networks
 from ferminet import observables
 from ferminet import pretrain
 from ferminet import psiformer
+from ferminet import distillation
 from ferminet.utils import statistics
 from ferminet.utils import system
 from ferminet.utils import utils
@@ -48,7 +49,6 @@ import numpy as np
 import optax
 from typing_extensions import Protocol
 import wandb
-
 
 def setup_wandb(config={}, running_on_hpc=False):
   # Training monitoring on wandb
@@ -538,7 +538,8 @@ def make_minsr_training_step(
 
 
 
-def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=True):
+def train(
+    cfg: ml_collections.ConfigDict, writer_manager=None):
   """Runs training loop for QMC.
 
   Args:
@@ -553,7 +554,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
   print(f"cfg.optim.optimizer = {repr(cfg.optim.optimizer)}")
 
   # Setting up wandb tracking
-  if wandb_monitoring:
+  if cfg.log.wandb:
     setup_wandb(running_on_hpc=False, config=cfg.to_dict())
 
   jax.config.update('jax_disable_jit', True)  # Disabling jit to check if its causing OOM
@@ -1156,9 +1157,51 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
         directory=ckpt_save_path,
         iteration_key=None,
         log=False)
+    
+  if cfg.optim.distilation:
+    # load network weights
+    (t_init_teacher,
+     data_teacher,
+     params_teacher,
+     opt_state_ckpt_teacher,
+     mcmc_width_ckpt_teacher,
+     density_state_ckpt_teacher) = checkpoint.restore(
+         ckpt_restore_filename, host_batch_size) = checkpoint.restore(
+           restore_filename=cfg.log.teacher_network_path)
 
-  return evaluate_loss, mcmc_step, sharded_key, data, params, mcmc_width, logabs_network
+  #return evaluate_loss, mcmc_step, sharded_key, data, params, mcmc_width, logabs_network
   with writer_manager as writer:
+
+    # Implement distillation here
+    if cfg.optim.distillation:
+      mcmc_width = mcmc_width_ckpt_teacher
+      t = t_init_teacher
+      iterations = 0
+      while True:
+        sharded_key, subkeys = kfac_jax.utils.p_split(
+          sharded_key)
+        data, params, opt_state, loss, aux_data, pmove = distillation.step(
+          data,
+          params,
+          opt_state,
+          subkeys,
+          data_teacher,
+          params_teacher,
+          mcmc_width)
+      
+        loss = loss[0]
+
+        mcmc_width, pmoves = mcmc.update_mcmc_width(
+          t, mcmc_width, cfg.mcmc.adapt_frequency, pmove, pmoves)
+
+        if iterations % cfg.distillation.energy_eval_iterations == 0:
+          local_energy = evaluate_loss() # Get the energy of the system
+
+        # Log and put on wandb
+        if loss < t:  # Break condition - if mean energy stagnates
+          break
+
+
     # Main training loop
     num_resets = 0  # used if reset_if_nan is true
     for t in range(t_init, cfg.optim.iterations):

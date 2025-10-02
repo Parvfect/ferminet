@@ -92,6 +92,9 @@ def default() -> ml_collections.ConfigDict:
           'spin_energy': 0.0,
           # If 'objective' is 'vmc_overlap', these parameters control the
           # penalty term.
+          'distillation': True,
+          # If distillation - looks for saved network and trains until the
+          # local energy of the new network stops decreasing
           'overlap': {
               # Weights on each state. Generate automatically if none provided.
               'weights': None,
@@ -130,6 +133,8 @@ def default() -> ml_collections.ConfigDict:
           }
       },
       'log': {
+          'wandb': False,
+          'save_iterations': 200, # iterations between saving network params and images to wandb
           'stats_frequency': 1,  # iterations between logging of stats
           'save_frequency': 10.0,  # minutes between saving network params
           # Path to save/restore network to/from. If falsy,
@@ -141,6 +146,8 @@ def default() -> ml_collections.ConfigDict:
           # Remaining log options are currently not functional.  Whether or not
           # to log the values of all walkers every iteration Use with caution!!!
           # Produces a lot of data very quickly.
+          'teacher_network_path': '',
+          # For Distillation, where the teacher network is stored
           'walkers': False,
           # Whether or not to log all local energies for each walker at each
           # step
