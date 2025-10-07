@@ -1157,7 +1157,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
         iteration_key=None,
         log=False)
 
-  return evaluate_loss, mcmc_step, sharded_key, data, params, mcmc_width, logabs_network
+  #return evaluate_loss, mcmc_step, sharded_key, data, params, mcmc_width, logabs_network
   with writer_manager as writer:
     # Main training loop
     num_resets = 0  # used if reset_if_nan is true
