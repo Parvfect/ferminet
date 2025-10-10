@@ -138,6 +138,7 @@ def default() -> ml_collections.ConfigDict:
           # Path containing checkpoint to restore network from.
           # Ignored if falsy or save_path contains a checkpoint.
           'restore_path': '',
+          'restore_from_checkpoint': False,
           # Remaining log options are currently not functional.  Whether or not
           # to log the values of all walkers every iteration Use with caution!!!
           # Produces a lot of data very quickly.

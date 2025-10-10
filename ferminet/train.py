@@ -753,7 +753,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
       checkpoint.find_last_checkpoint(ckpt_save_path) or
       checkpoint.find_last_checkpoint(ckpt_restore_path))
 
-  if ckpt_restore_filename:
+  if ckpt_restore_filename and cfg.log.restore_from_checkpoint:
     (t_init,
      data,
      params,
