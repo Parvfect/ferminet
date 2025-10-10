@@ -289,7 +289,7 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
       key: chex.PRNGKey,
       ntk=False,
       ntk_solver='cg',
-      centre_gradients=False
+      centre_gradients=True
   ) -> OptUpdateResults:
     """Evaluates the loss and gradients and updates the parameters using optax."""
 
