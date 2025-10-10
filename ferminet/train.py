@@ -289,7 +289,7 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
       key: chex.PRNGKey,
       ntk=False,
       ntk_solver='cg',
-      centre_gradients=True
+      centre_gradients=False
   ) -> OptUpdateResults:
     """Evaluates the loss and gradients and updates the parameters using optax."""
 
@@ -309,7 +309,7 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
       jax.vjp(f, params)[1](v))[0]
     
     def fisher_matmul(
-        v, centre_gradients=True, damping=1e-2):
+        v, centre_gradients=centre_gradients, damping=1e-2):
       
       if ntk:
         log_psi_jac_v = vjp_func(v)
