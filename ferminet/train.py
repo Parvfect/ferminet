@@ -351,7 +351,7 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
 
   return opt_update
 
-
+  
 def make_loss_step(evaluate_loss: qmc_loss_functions.LossFn) -> OptUpdate:
   """Returns an OptUpdate function for evaluating the loss."""
 
