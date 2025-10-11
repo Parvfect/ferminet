@@ -33,10 +33,6 @@ from ferminet import networks
 from ferminet import observables
 from ferminet import pretrain
 from ferminet import psiformer
-<<<<<<< Updated upstream
-=======
-#from ferminet import distillation
->>>>>>> Stashed changes
 from ferminet.utils import statistics
 from ferminet.utils import system
 from ferminet.utils import utils
