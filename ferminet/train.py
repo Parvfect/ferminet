@@ -33,6 +33,10 @@ from ferminet import networks
 from ferminet import observables
 from ferminet import pretrain
 from ferminet import psiformer
+<<<<<<< Updated upstream
+=======
+#from ferminet import distillation
+>>>>>>> Stashed changes
 from ferminet.utils import statistics
 from ferminet.utils import system
 from ferminet.utils import utils
@@ -53,7 +57,7 @@ import wandb
 def setup_wandb(config={}, running_on_hpc=False):
   # Training monitoring on wandb
   wandb_login(running_on_hpc=running_on_hpc)
-  start_wandb_run(config=config, project_name="ferminet")
+  start_wandb_run(config=config, project_name="ferminet2")
 
 def store_last_gradient():
     """Transformation that remembers the most recent gradient."""
@@ -1156,9 +1160,59 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
         directory=ckpt_save_path,
         iteration_key=None,
         log=False)
+<<<<<<< Updated upstream
 
   #return evaluate_loss, mcmc_step, sharded_key, data, params, mcmc_width, logabs_network
   with writer_manager as writer:
+=======
+  """
+  if cfg.optim.distilation:
+    # load network weights
+    (t_init_teacher,
+     data_teacher,
+     params_teacher,
+     opt_state_ckpt_teacher,
+     mcmc_width_ckpt_teacher,
+     density_state_ckpt_teacher) = checkpoint.restore(
+         ckpt_restore_filename, host_batch_size) = checkpoint.restore(
+           restore_filename=cfg.log.teacher_network_path)
+  """
+           
+  #return evaluate_loss, mcmc_step, sharded_key, data, params, mcmc_width, logabs_network
+  with writer_manager as writer:
+
+    """
+    # Implement distillation here
+    if cfg.optim.distillation:
+      mcmc_width = mcmc_width_ckpt_teacher
+      t = t_init_teacher
+      iterations = 0
+      while True:
+        sharded_key, subkeys = kfac_jax.utils.p_split(
+          sharded_key)
+        data, params, opt_state, loss, aux_data, pmove = distillation.step(
+          data,
+          params,
+          opt_state,
+          subkeys,
+          data_teacher,
+          params_teacher,
+          mcmc_width)
+      
+        loss = loss[0]
+
+        mcmc_width, pmoves = mcmc.update_mcmc_width(
+          t, mcmc_width, cfg.mcmc.adapt_frequency, pmove, pmoves)
+
+        if iterations % cfg.distillation.energy_eval_iterations == 0:
+          local_energy = evaluate_loss() # Get the energy of the system
+
+        # Log and put on wandb
+        if loss < t:  # Break condition - if mean energy stagnates
+          break
+    """
+
+>>>>>>> Stashed changes
     # Main training loop
     num_resets = 0  # used if reset_if_nan is true
     for t in range(t_init, cfg.optim.iterations):
