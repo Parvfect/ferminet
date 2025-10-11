@@ -340,7 +340,7 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
       #x0 = opt_state[0]  # Using previous grad as guess - have to handle pmapping first
       x0 = flat_grads  # Using loss grads as guess        
       grads = jax.scipy.sparse.linalg.cg(
-        fisher_matmul, flat_grads, x0=x0, maxiter=50)[0]
+        fisher_matmul, flat_grads, x0=x0, maxiter=10)[0]
 
     grads = constants.pmean(grads)  # Handling for multi-gpu
     updates, opt_state = optimizer.update(  
