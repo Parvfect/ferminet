@@ -95,7 +95,7 @@ def get_config():
   cfg = base_config.default()
   # Can specify homonuclear diatomics using X2 or heteronuclear diaomics using
   # XY.
-  cfg.system.molecule_name = 'N2'
+  cfg.system.molecule_name = 'H2'
 
   cfg.system.bond_length = -1.0
   cfg.system.units = 'angstrom'

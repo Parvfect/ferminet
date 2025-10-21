@@ -53,7 +53,7 @@ import wandb
 def setup_wandb(config={}, running_on_hpc=False):
   # Training monitoring on wandb
   wandb_login(running_on_hpc=running_on_hpc)
-  start_wandb_run(config=config, project_name="ferminet2")
+  start_wandb_run(config=config, project_name="ferminet-td")
 
 def store_last_gradient():
     """Transformation that remembers the most recent gradient."""
@@ -341,6 +341,10 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
       x0 = flat_grads  # Using loss grads as guess        
       grads = jax.scipy.sparse.linalg.cg(
         fisher_matmul, flat_grads, x0=x0, maxiter=100)[0]
+      
+
+    # For TD
+    grads = 1j * grads
 
     grads = constants.pmean(grads)  # Handling for multi-gpu
     updates, opt_state = optimizer.update(  
