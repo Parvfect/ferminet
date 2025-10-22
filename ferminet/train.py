@@ -289,11 +289,18 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
       key: chex.PRNGKey,
       ntk=False,
       ntk_solver='cg',
-      centre_gradients=True
+      centre_gradients=True,
+      time_dep=True,
   ) -> OptUpdateResults:
     """Evaluates the loss and gradients and updates the parameters using optax."""
 
-    (loss, aux_data), grad = loss_and_grad(params, key, data)
+    try:
+      time = opt_state[0].count
+    except Exception as e:
+      time = 0
+
+    print(time)
+    (loss, aux_data), grad = loss_and_grad(params, key, data, time)
     flat_grads, unravel_fn = jax.flatten_util.ravel_pytree(grad)
     energies = aux_data.local_energy - loss
     batch_size = energies.shape[0]
@@ -342,9 +349,9 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
       grads = jax.scipy.sparse.linalg.cg(
         fisher_matmul, flat_grads, x0=x0, maxiter=100)[0]
       
-
     # For TD
-    grads = 1j * grads
+    if time_dep:
+      grads = 1j * grads
 
     grads = constants.pmean(grads)  # Handling for multi-gpu
     updates, opt_state = optimizer.update(  
@@ -1035,7 +1042,9 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
     )
     sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
     opt_state = optimizer.init(params, subkeys, data)
-    opt_state = opt_state_ckpt or opt_state  # avoid overwriting ckpted state
+
+    if not cfg.optim.sr.time_dep:
+      opt_state = opt_state_ckpt or opt_state  # avoid overwriting ckpted state
 
   elif cfg.optim.optimizer == 'minsr':
     optimizer = optax.chain(
@@ -1064,7 +1073,9 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
   elif isinstance(optimizer, optax.GradientTransformation):
     # optax/optax-compatible optimizer (ADAM, LAMB, ...)
     opt_state = jax.pmap(optimizer.init)(params)
-    opt_state = opt_state_ckpt or opt_state  # avoid overwriting ckpted state
+
+    if not cfg.optim.sr.time_dep:  # Be careful with this game!
+      opt_state = opt_state_ckpt or opt_state  # avoid overwriting ckpted state
 
     if cfg.optim.optimizer == 'minsr':  # For now while I'm using optax
       step = make_minsr_training_step(

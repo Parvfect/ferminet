@@ -30,7 +30,7 @@ BOND_LENGTHS = {
     'CN': 1.134797,
     'ClF': 1.659091,
     'F2': 1.420604,
-    'H2': 0.737164,
+    'H2': 0.737164 * 2,  # For testing Carleo's laser system
     'HCl': 1.2799799,
     'Li2': 2.77306,
     'LiH': 1.639999,

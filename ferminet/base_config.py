@@ -126,7 +126,8 @@ def default() -> ml_collections.ConfigDict:
             'ntk_solver': 'linear',
             'centre_gradients': True,
             'preconditioning': False,
-            'preset_guess': 'grad'  # grad or loss_energies
+            'preset_guess': 'grad',  # grad or loss_energies
+            'time_dep': True,
           }
       },
       'log': {

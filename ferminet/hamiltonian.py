@@ -263,6 +263,30 @@ def excited_kinetic_energy_matrix(
   return _lapl_over_f
 
 
+def potential_electric_field(pos: Array, t: int, w: float):
+  E_vec = jnp.array([0.0, 0.0, 1.0]) # Unit vector along z direction
+  E_max = 0.05
+
+  T = 0.4 # period
+
+  try:
+    if t < T:
+      w2 = t/T
+    elif t > T and t < 2*T:
+      w2 = 1
+    elif t > 2 * T and t < 3*T:
+      w2 = 3 - t/T
+    else:
+      w2 = 0
+    print(t)
+  except:
+    print("Don't think my time stepping is right")
+    w2 = 1.0
+
+  return -sum([
+    jnp.dot(E_vec, pos[k: k+3]) * E_max * jnp.sin(w * t) * w2 for k in range(0, (pos.shape[0]//3 - 1))])
+
+
 def potential_electron_electron(r_ee: Array) -> jnp.ndarray:
   """Returns the electron-electron potential.
 
@@ -299,7 +323,7 @@ def potential_nuclear_nuclear(charges: Array, atoms: Array) -> jnp.ndarray:
 
 
 def potential_energy(r_ae: Array, r_ee: Array, atoms: Array,
-                     charges: Array) -> jnp.ndarray:
+                     charges: Array, time: int = 0, pos: Array = None) -> jnp.ndarray:
   """Returns the potential energy for this electron configuration.
 
   Args:
@@ -313,7 +337,9 @@ def potential_energy(r_ae: Array, r_ee: Array, atoms: Array,
   """
   return (potential_electron_electron(r_ee) +
           potential_electron_nuclear(charges, r_ae) +
-          potential_nuclear_nuclear(charges, atoms))
+          potential_nuclear_nuclear(charges, atoms) +
+          potential_electric_field(pos, time, w=0.10)
+          )
 
 
 def local_energy(
@@ -375,7 +401,8 @@ def local_energy(
     pp_nonlocal = lambda *args, **kwargs: 0.0
 
   def _e_l(
-      params: networks.ParamTree, key: chex.PRNGKey, data: networks.FermiNetData
+      params: networks.ParamTree, key: chex.PRNGKey, data: networks.FermiNetData,
+      time: int = 0
   ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray]]:
     """Returns the total energy.
 
@@ -384,7 +411,7 @@ def local_energy(
       key: RNG state.
       data: MCMC configuration.
     """
-    if states:
+    if states:  # This is for excited states
       # Compute features
       vmap_features = jax.vmap(networks.construct_input_features, (0, None))
       positions = jnp.reshape(data.positions, [states, -1])
@@ -444,7 +471,8 @@ def local_energy(
       ae, _, r_ae, r_ee = networks.construct_input_features(
           data.positions, data.atoms
       )
-      potential = (potential_energy(r_ae, r_ee, data.atoms, effective_charges) +
+
+      potential = (potential_energy(r_ae, r_ee, data.atoms, effective_charges, time, data.positions) +
                    pp_local(r_ae) +
                    pp_nonlocal(key, f, params, data, ae, r_ae))
       kinetic = ke(params, data)

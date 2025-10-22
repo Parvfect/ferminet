@@ -192,6 +192,7 @@ def make_loss(network: networks.LogFermiNetLike,
           None,
           0,
           networks.FermiNetData(positions=0, spins=0, atoms=0, charges=0),
+          None # for time
       ),
       out_axes=(0, 0)
   )
@@ -202,6 +203,7 @@ def make_loss(network: networks.LogFermiNetLike,
       params: networks.ParamTree,
       key: chex.PRNGKey,
       data: networks.FermiNetData,
+      time: int = 0
   ) -> Tuple[jnp.ndarray, AuxiliaryLossData]:
     """Evaluates the total energy of the network for a batch of configurations.
 
@@ -221,7 +223,7 @@ def make_loss(network: networks.LogFermiNetLike,
       over the batch and over all devices inside a pmap.
     """
     keys = jax.random.split(key, num=data.positions.shape[0])
-    e_l, e_l_mat = batch_local_energy(params, keys, data)
+    e_l, e_l_mat = batch_local_energy(params, keys, data, time)
     loss = constants.pmean(jnp.mean(e_l))
     loss_diff = e_l - loss
     variance = constants.pmean(jnp.mean(loss_diff * jnp.conj(loss_diff)))
@@ -236,8 +238,8 @@ def make_loss(network: networks.LogFermiNetLike,
   @total_energy.defjvp
   def total_energy_jvp(primals, tangents):  # pylint: disable=unused-variable
     """Custom Jacobian-vector product for unbiased local energy gradients."""
-    params, key, data = primals
-    loss, aux_data = total_energy(params, key, data)
+    params, key, data, time = primals
+    loss, aux_data = total_energy(params, key, data, time)
 
     if clip_local_energy > 0.0:
       aux_data.clipped_energy, diff = clip_local_values(
@@ -332,6 +334,7 @@ def make_wqmc_loss(
           None,
           0,
           networks.FermiNetData(positions=0, spins=0, atoms=0, charges=0),
+          None  # for time
       ),
       out_axes=(0, 0)
   )
