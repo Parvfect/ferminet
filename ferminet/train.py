@@ -1242,8 +1242,21 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
       # Dipole moment
       pos = data.positions
       atoms = data.atoms
+      # pos: (pmap_dim, n_walkers, n_electrons * ndim)
+      pos_reshaped = pos.reshape(pos.shape[0], pos.shape[1], -1, 3)  # (pmap, walkers, n_electrons, 3)
+      # Electrons: negative charge
+      electron_dipole = -jnp.sum(pos_reshaped, axis=2)  # sum over electrons
 
-      dipole_moment = jnp.linalg.norm(- jnp.mean(sum([pos[0,:, i: i+2] for i in range(0, pos.shape[-1]-4, 3)])) + jnp.mean(sum([atoms[0,:, i] for i in range(atoms.shape[2])])))
+      # Nuclei: atoms[..., :3] contains positions
+      nuclear_dipole = jnp.sum(atoms, axis=2)  # sum over atoms
+
+      # Total dipole vector
+      dipole_vec = nuclear_dipole + electron_dipole  # shape: (pmap_dim, n_walkers, 3)
+      dipole_moment = jnp.linalg.norm(dipole_vec, axis=-1)  # (pmap_dim, n_walkers)
+      dipole_moment = jnp.mean(dipole_moment)
+
+
+      #dipole_moment = jnp.linalg.norm(- jnp.mean(sum([pos[0,:, i: i+2] for i in range(0, pos.shape#[-1]-4, 3)])) + jnp.mean(sum([atoms[0,:, i] for i in range(atoms.shape[2])])))
 
       # Logging
       if t % cfg.log.stats_frequency == 0:
