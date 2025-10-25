@@ -1189,7 +1189,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
             data,
             params,
             opt_state,
-            {"time": t},
+            {"time": t - t_init},
             subkeys,
             mcmc_width)
       else:
