@@ -286,6 +286,7 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
       params: networks.ParamTree,
       data: networks.FermiNetData,
       opt_state: Optional[optax.OptState],
+      minsr_state,
       key: chex.PRNGKey,
       ntk=False,
       ntk_solver='cg',
@@ -295,7 +296,7 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
     """Evaluates the loss and gradients and updates the parameters using optax."""
 
     try:
-      time = opt_state[0].count
+      time = minsr_state['time']
     except Exception as e:
       time = 0
 
@@ -515,11 +516,14 @@ def make_minsr_training_step(
     step, a callable which performs a set of MCMC steps and then an optimization
     update. See the Step protocol for details.
   """
-  @functools.partial(constants.pmap, donate_argnums=(0, 1, 2))
+  @functools.partial(constants.pmap,
+                    in_axes=(0, 0, 0, None, 0, 0),
+                    donate_argnums=(0, 1, 2))
   def step(
       data: networks.FermiNetData,
       params: networks.ParamTree,
-      state: Optional[optax.OptState],
+      opt_state: Optional[optax.OptState],
+      minsr_state,
       key: chex.PRNGKey,
       mcmc_width: jnp.ndarray
   ) -> StepResults:
@@ -534,14 +538,15 @@ def make_minsr_training_step(
     # Optimization step
     new_params, new_state, loss, aux_data = optimizer_step(params,
                                                            data,
-                                                           state,
+                                                           opt_state,
+                                                           minsr_state,
                                                            loss_key)
     if reset_if_nan:
       new_params = jax.lax.cond(jnp.isnan(loss),
                                 lambda: params,
                                 lambda: new_params)
       new_state = jax.lax.cond(jnp.isnan(loss),
-                               lambda: state,
+                               lambda: opt_state,
                                lambda: new_state)
     return data, new_params, new_state, loss, aux_data, pmove
 
@@ -1178,12 +1183,22 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
     num_resets = 0  # used if reset_if_nan is true
     for t in range(t_init, cfg.optim.iterations):
       sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
-      data, params, opt_state, loss, aux_data, pmove = step(
-          data,
-          params,
-          opt_state,
-          subkeys,
-          mcmc_width)
+
+      if cfg.optim.optimizer == 'minsr':
+        data, params, opt_state, loss, aux_data, pmove = step(
+            data,
+            params,
+            opt_state,
+            {"time": t},
+            subkeys,
+            mcmc_width)
+      else:
+        data, params, opt_state, loss, aux_data, pmove = step(
+            data,
+            params,
+            opt_state,
+            subkeys,
+            mcmc_width)
 
       # due to pmean, loss, and pmove should be the same across
       # devices.
