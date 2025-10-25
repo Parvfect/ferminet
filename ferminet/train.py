@@ -1237,6 +1237,13 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
               raise e
           else:
             raise e
+          
+
+      # Dipole moment
+      pos = data.positions
+      atoms = data.atoms
+
+      dipole_moment = jnp.linalg.norm(- jnp.mean(sum([pos[0,:, i: i+2] for i in range(0, pos.shape[-1]-4, 3)])) + jnp.mean(sum([atoms[0,:, i] for i in range(atoms.shape[2])])))
 
       # Logging
       if t % cfg.log.stats_frequency == 0:
@@ -1249,6 +1256,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
           metrics = {
                   "mean_energy": loss,
                   "variance": weighted_stats.variance,
+                  "dipole": dipole_moment,
                   "pmove": pmove
               }
 
