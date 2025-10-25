@@ -267,8 +267,10 @@ def potential_electric_field(pos: Array, t: int, w: float):
   E_vec = jnp.array([0.0, 0.0, 1.0]) # Unit vector along z direction
   E_max = 0.05
 
-  T = 0.4 # period
+  t = t * 0.01 # Doing dt
 
+  T = 1 # period
+  
   try:
     if t < T:
       w2 = t/T
@@ -277,7 +279,7 @@ def potential_electric_field(pos: Array, t: int, w: float):
     elif t > 2 * T and t < 3*T:
       w2 = 3 - t/T
     else:
-      w2 = 0
+      w2 = 1
     print(t)
   except:
     print("Don't think my time stepping is right")
