@@ -267,6 +267,7 @@ def potential_electric_field(pos: Array, t: int, w: float):
   E_vec = jnp.array([0.0, 0.0, 1.0]) # Unit vector along z direction
   E_max = 0.05
 
+  print(t)
   t = t * 0.01 # Doing dt
 
   T = 1 # period
@@ -283,6 +284,7 @@ def potential_electric_field(pos: Array, t: int, w: float):
   except Exception as e:
     print(e)
     print("Don't think my time stepping is right")
+    print(t)
     w2 = 1.0
   #return 0
   return - sum([
