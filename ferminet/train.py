@@ -1267,10 +1267,13 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
       # Dipole moment
       # pos: (pmap_dim, n_walkers, n_electrons * 3)
       # atoms: (pmap_dim, n_walkers, n_atoms, 3)
-      # atom_charges: (n_atoms,)  # e.g., jnp.array([1., 1.])
+
+      pos = data.positions
+      atoms = data.atoms
 
       # 1️⃣ reshape electrons
-      pos_reshaped = pos.reshape(pos.shape[0], pos.shape[1], -1, 3)  # (pmap, walkers, n_electrons, 3)
+      pos_reshaped = pos.reshape(
+        pos.shape[0], pos.shape[1], -1, 3)  # (pmap, walkers, n_electrons, 3)
 
       # 2️⃣ compute nuclear centroid
       nuclear_center = jnp.mean(atoms, axis=2, keepdims=True)  # (pmap, walkers, 1, 3)
