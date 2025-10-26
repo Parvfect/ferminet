@@ -296,11 +296,7 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
   ) -> OptUpdateResults:
     """Evaluates the loss and gradients and updates the parameters using optax."""
 
-    try:
-      time = minsr_state['time']
-    except Exception as e:
-      time = 0
-
+    time = minsr_state['time']
     (loss, aux_data), grad = loss_and_grad(params, key, data, time)
     flat_grads, unravel_fn = jax.flatten_util.ravel_pytree(grad)
     energies = aux_data.local_energy - loss

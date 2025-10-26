@@ -272,6 +272,7 @@ def potential_electric_field(pos: Array, t: int, w: float):
 
   T = 1 # period
   
+  """
   try:
     if t < T:
       w2 = t/T
@@ -286,6 +287,8 @@ def potential_electric_field(pos: Array, t: int, w: float):
     print("Don't think my time stepping is right")
     print(t)
     w2 = 1.0
+  """
+  w2 = 1.0
   #return 0
   return - sum([
     jnp.dot(E_vec, pos[k: k+3]) * E_max * jnp.sin(w * t) * w2 for k in range(
