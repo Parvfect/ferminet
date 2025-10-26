@@ -292,6 +292,7 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
       ntk_solver='cg',
       centre_gradients=True,
       time_dep=True,
+      dt=0.01
   ) -> OptUpdateResults:
     """Evaluates the loss and gradients and updates the parameters using optax."""
 
@@ -300,7 +301,6 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
     except Exception as e:
       time = 0
 
-    print(time)
     (loss, aux_data), grad = loss_and_grad(params, key, data, time)
     flat_grads, unravel_fn = jax.flatten_util.ravel_pytree(grad)
     energies = aux_data.local_energy - loss
@@ -351,13 +351,35 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
         fisher_matmul, flat_grads, x0=x0, maxiter=100)[0]
       
     # For TD
-    if time_dep:
-      grads = 1j * grads
+    if not time_dep:
+      grads = constants.pmean(grads)  # Handling for multi-gpu
+      updates, opt_state = optimizer.update(  
+        unravel_fn(grads), opt_state, params)
+      new_params = optax.apply_updates(params, updates)
 
-    grads = constants.pmean(grads)  # Handling for multi-gpu
-    updates, opt_state = optimizer.update(  
-      unravel_fn(grads), opt_state, params)
-    new_params = optax.apply_updates(params, updates)
+    else:
+
+      ## RK2
+      grads = 1j * grads
+      grads = constants.pmean(grads) * 0.5
+      updates, opt_state = optimizer.update(  
+        unravel_fn(grads), opt_state, params)
+      new_params = optax.apply_updates(params, updates)
+
+      (loss, aux_data), grad = loss_and_grad(
+        new_params, key, data, time + dt/2)
+      flat_grads, unravel_fn = jax.flatten_util.ravel_pytree(grad)
+      energies = aux_data.local_energy - loss
+
+      x0 = flat_grads  # Using loss grads as guess        
+      grads = jax.scipy.sparse.linalg.cg(
+        fisher_matmul, flat_grads, x0=x0, maxiter=100)[0]
+      
+      grads = 1j * grads
+      grads = constants.pmean(grads)
+      updates, opt_state = optimizer.update(  
+        unravel_fn(grads), opt_state, params)
+      new_params = optax.apply_updates(params, updates)
 
     return new_params, opt_state, loss, aux_data
 
@@ -1052,7 +1074,14 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
       opt_state = opt_state_ckpt or opt_state  # avoid overwriting ckpted state
 
   elif cfg.optim.optimizer == 'minsr':
-    optimizer = optax.chain(
+
+    if cfg.optim.sr.time_dep:
+      optimizer = optax.chain(
+        store_last_gradient(),
+        optax.scale(0.01),
+        optax.scale(-1.),)
+    else:
+      optimizer = optax.chain(
         store_last_gradient(),
         optax.scale_by_schedule(learning_rate_schedule),
         optax.scale(-1.),)
