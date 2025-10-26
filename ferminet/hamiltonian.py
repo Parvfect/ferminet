@@ -267,7 +267,6 @@ def potential_electric_field(pos: Array, t: int, w: float):
   E_vec = jnp.array([0.0, 0.0, 1.0]) # Unit vector along z direction
   E_max = 0.05
 
-  print(t)
   t = t * 0.01 # Doing dt
 
   T = 1 # period
