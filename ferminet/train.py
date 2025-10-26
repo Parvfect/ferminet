@@ -1277,8 +1277,9 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
 
       # Total dipole vector
       dipole_vec = nuclear_dipole + electron_dipole  # shape: (pmap_dim, n_walkers, 3)
-      dipole_moment = jnp.linalg.norm(dipole_vec, axis=-1)  # (pmap_dim, n_walkers)
-      dipole_moment = jnp.mean(dipole_moment)
+      dipole_moment = jnp.mean(dipole_vec[..., 2])
+      #dipole_moment = jnp.linalg.norm(dipole_vec, axis=-1)  # (pmap_dim, n_walkers)
+      #dipole_moment = jnp.mean(dipole_moment)
 
 
       #dipole_moment = jnp.linalg.norm(- jnp.mean(sum([pos[0,:, i: i+2] for i in range(0, pos.shape#[-1]-4, 3)])) + jnp.mean(sum([atoms[0,:, i] for i in range(atoms.shape[2])])))
