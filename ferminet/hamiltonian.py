@@ -280,7 +280,8 @@ def potential_electric_field(pos: Array, t: int, w: float):
       w2 = 3 - t/T
     else:
       w2 = 1
-  except:
+  except Exception as e:
+    print(e)
     print("Don't think my time stepping is right")
     w2 = 1.0
   #return 0
