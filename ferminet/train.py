@@ -1265,21 +1265,34 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
           
 
       # Dipole moment
-      pos = data.positions
-      atoms = data.atoms
-      # pos: (pmap_dim, n_walkers, n_electrons * ndim)
+      # pos: (pmap_dim, n_walkers, n_electrons * 3)
+      # atoms: (pmap_dim, n_walkers, n_atoms, 3)
+      # atom_charges: (n_atoms,)  # e.g., jnp.array([1., 1.])
+
+      # 1️⃣ reshape electrons
       pos_reshaped = pos.reshape(pos.shape[0], pos.shape[1], -1, 3)  # (pmap, walkers, n_electrons, 3)
-      # Electrons: negative charge
-      electron_dipole = -jnp.sum(pos_reshaped, axis=2)  # sum over electrons
 
-      # Nuclei: atoms[..., :3] contains positions
-      nuclear_dipole = jnp.sum(atoms, axis=2)  # sum over atoms
+      # 2️⃣ compute nuclear centroid
+      nuclear_center = jnp.mean(atoms, axis=2, keepdims=True)  # (pmap, walkers, 1, 3)
 
-      # Total dipole vector
-      dipole_vec = nuclear_dipole + electron_dipole  # shape: (pmap_dim, n_walkers, 3)
-      dipole_moment = jnp.mean(dipole_vec[..., 2])
-      #dipole_moment = jnp.linalg.norm(dipole_vec, axis=-1)  # (pmap_dim, n_walkers)
-      #dipole_moment = jnp.mean(dipole_moment)
+      # 3️⃣ center electrons and nuclei
+      pos_centered = pos_reshaped - nuclear_center  # electrons relative to centroid
+      atoms_centered = atoms - nuclear_center      # nuclei relative to centroid
+
+      # 4️⃣ sum dipoles
+      electron_dipole = -jnp.sum(pos_centered, axis=2)  # sum over electrons
+      nuclear_dipole = jnp.sum(atoms_centered, axis=2)
+
+      dipole_vec = nuclear_dipole + electron_dipole  # (pmap, walkers, 3)
+
+      # 5️⃣ z-component along field
+      dipole_z = dipole_vec[..., 2]
+
+      # 6️⃣ mean and std over pmap and walkers
+      dipole_mean = jnp.mean(dipole_z)
+      dipole_std = jnp.std(dipole_z)
+
+      print("⟨μ_z⟩ =", dipole_mean, "±", dipole_std)
 
 
       #dipole_moment = jnp.linalg.norm(- jnp.mean(sum([pos[0,:, i: i+2] for i in range(0, pos.shape#[-1]-4, 3)])) + jnp.mean(sum([atoms[0,:, i] for i in range(atoms.shape[2])])))
@@ -1295,7 +1308,8 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
           metrics = {
                   "mean_energy": loss,
                   "variance": weighted_stats.variance,
-                  "dipole": dipole_moment,
+                  "dipole": dipole_mean,
+                  "dipole_std": dipole_std,
                   "pmove": pmove
               }
 
