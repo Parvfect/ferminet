@@ -131,7 +131,8 @@ def default() -> ml_collections.ConfigDict:
           }
       },
       'log': {
-          'stats_frequency': 1,  # iterations between logging of stats
+          'stats_frequency': 1,  # iterations between logging of stats,
+          'log_frequency': 1000,  # iterations between logging of stats
           'save_frequency': 10.0,  # minutes between saving network params
           # Path to save/restore network to/from. If falsy,
           # creates a timestamped directory in the working directory.
@@ -151,6 +152,7 @@ def default() -> ml_collections.ConfigDict:
           # wavefunction dependent on using log_energy mode or not for each
           # walker at each step
           'features': False,
+          'wandb': True,
       },
       'system': {
           'type': SystemType.MOLECULE.value,
