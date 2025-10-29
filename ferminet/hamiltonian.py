@@ -344,7 +344,7 @@ def potential_energy(r_ae: Array, r_ee: Array, atoms: Array,
   return (potential_electron_electron(r_ee) +
           potential_electron_nuclear(charges, r_ae) +
           potential_nuclear_nuclear(charges, atoms) +
-          potential_electric_field(pos, time, w=0.10)
+          potential_electric_field(pos, time, w=0.02)
           )
 
 
