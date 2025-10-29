@@ -39,6 +39,8 @@ from ferminet.utils import utils
 from ferminet.utils import writers
 from ferminet.minsr import MinSR
 from ferminet.training_monitoring import wandb_login, start_wandb_run
+from ferminet.visual_tools import \
+  plot_electron_histograms, plot_combined_electron_positions, plot_electron_presence_map
 import jax
 from jax.experimental import multihost_utils
 import jax.numpy as jnp
@@ -1202,6 +1204,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
         iteration_key=None,
         log=False)
 
+  batch_network_pmapped = constants.pmap(batch_network)
   #return evaluate_loss, mcmc_step, sharded_key, data, params, mcmc_width, logabs_network
   with writer_manager as writer:
     # Main training loop
@@ -1292,8 +1295,8 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
       dipole_z = dipole_vec[..., 2]
 
       # 6️⃣ mean and std over pmap and walkers
-      dipole_mean = jnp.mean(dipole_z)
-      dipole_std = jnp.std(dipole_z)
+      dipole_mean = jnp.mean(dipole_vec)
+      dipole_std = jnp.std(dipole_vec)
 
       print("⟨μ_z⟩ =", dipole_mean, "±", dipole_std)
 
@@ -1341,6 +1344,29 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
             logging_args += obs_data,
         logging.info(logging_str, *logging_args)
         writer.write(t, **writer_kwargs)
+
+      if t % cfg.log.log_frequency == 0 and cfg.log.wandb:
+
+        # Visual data
+        batch_network_output = batch_network_pmapped(
+          params, data.positions, data.spins, data.atoms, data.charges)
+        pos = data.positions
+        prob_density = jnp.exp(batch_network_output)
+        img_array = plot_electron_histograms(
+          pos, prob_density)
+        combined_img_array = plot_electron_presence_map(pos)
+
+        # wandb logging
+        indv_images = wandb.Image(
+          img_array, caption=f"Epoch {t}")
+        combined_img = wandb.Image(
+          combined_img_array, caption=f"Epoch {t}")
+        metrics = {
+                "indv_plots": indv_images,
+                "full_plot": combined_img
+            }
+
+        wandb.log(metrics)
 
       # Log data about observables too big to fit in a CSV
       if cfg.system.states:
