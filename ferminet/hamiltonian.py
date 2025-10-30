@@ -284,7 +284,7 @@ def potential_electric_field(pos: Array, t: int):
   )
 
   return - sum([
-    jnp.dot(E_vec, pos[k: k+3]) * E_max * jnp.sin(w * t) * w2 for k in range(
+    E_max * jnp.sin(w * t) * w2 for k in range(
       0, pos.shape[0], 3)])
 
 
