@@ -1282,14 +1282,14 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
       nuclear_center = jnp.mean(atoms, axis=2, keepdims=True)  # (pmap, walkers, 1, 3)
 
       # 3️⃣ center electrons and nuclei
-      pos_centered = pos_reshaped - nuclear_center  # electrons relative to centroid
+      pos_centered = pos_reshaped  # electrons relative to centroid
       atoms_centered = atoms - nuclear_center      # nuclei relative to centroid
 
       # 4️⃣ sum dipoles
       electron_dipole = -jnp.sum(pos_centered, axis=2)  # sum over electrons
-      nuclear_dipole = jnp.sum(atoms_centered, axis=2)
+      #nuclear_dipole = jnp.sum(atoms_centered, axis=2)
 
-      dipole_vec = electron_dipole + nuclear_dipole # (pmap, walkers, 3)
+      dipole_vec = electron_dipole  # (pmap, walkers, 3)
 
       # 5️⃣ z-component along field
       dipole_z = dipole_vec[..., 2]
