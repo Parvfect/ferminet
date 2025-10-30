@@ -263,31 +263,26 @@ def excited_kinetic_energy_matrix(
   return _lapl_over_f
 
 
-def potential_electric_field(pos: Array, t: int, w: float):
+def potential_electric_field(pos: Array, t: int):
   E_vec = jnp.array([0.0, 0.0, 1.0]) # Unit vector along z direction
-  E_max = 0.05
+  
+  E_max = 0.06
+  w = 15
 
   t = t * 0.01 # Doing dt
 
-  T = 1 # period
+  T = 2 * 3.14 / w # period
+
+  w2 = jnp.where(
+    t < T, t/T, jnp.where(
+      t < 2 * T, 1, jnp.where(
+        t < 3 * T, 3 - t/T, jnp.where(
+          t >= 3 * t, 0, 0 
+        )
+      )
+    )
+  )
   
-  """
-  try:
-    if t < T:
-      w2 = t/T
-    elif t > T and t < 2*T:
-      w2 = 1
-    elif t > 2 * T and t < 3*T:
-      w2 = 3 - t/T
-    else:
-      w2 = 1
-  except Exception as e:
-    print(e)
-    print("Don't think my time stepping is right")
-    print(t)
-    w2 = 1.0
-  """
-  w2 = 1.0
   return - sum([
     jnp.dot(E_vec, pos[k: k+3]) * E_max * jnp.sin(w * t) * w2 for k in range(
       0, pos.shape[0], 3)])
@@ -344,7 +339,7 @@ def potential_energy(r_ae: Array, r_ee: Array, atoms: Array,
   return (potential_electron_electron(r_ee) +
           potential_electron_nuclear(charges, r_ae) +
           potential_nuclear_nuclear(charges, atoms) +
-          potential_electric_field(pos, time, w=0.02)
+          potential_electric_field(pos, time)
           )
 
 
