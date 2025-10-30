@@ -285,7 +285,7 @@ def potential_electric_field(pos: Array, t: int):
 
   # Add the dot product here, testing if that is at fault
   return - sum([
-    E_max * jnp.sin(w * t) * w2 for k in range(
+    E_max * jnp.sin(w * t) * w2 * jnp.dot(E_vec, pos[k: k + 3]) for k in range(
       0, pos.shape[0], 3)])
 
 
