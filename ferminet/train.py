@@ -1077,7 +1077,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
     if cfg.optim.sr.time_dep:
       optimizer = optax.chain(
         store_last_gradient(),
-        optax.scale(0.01),
+        optax.scale(0.001),
         optax.scale(-1.),)
     else:
       optimizer = optax.chain(
