@@ -267,9 +267,9 @@ def potential_electric_field(pos: Array, t: int):
   E_vec = jnp.array([0.0, 0.0, 1.0]) # Unit vector along z direction
   
   E_max = 0.06
-  w = 15
+  w = 0.5
 
-  t = t # Doing dt - quite abrupt, but let's see
+  t = t * 0.01 # Doing dt - quite abrupt, but let's see
 
   T = 2 * 3.14 / w # period
 
@@ -285,7 +285,7 @@ def potential_electric_field(pos: Array, t: int):
 
   # Add the dot product here, testing if that is at fault
   return - sum([
-    E_max * jnp.sin(w * t * 0.01) * w2 for k in range(
+    E_max * jnp.sin(w * t) * w2 for k in range(
       0, pos.shape[0], 3)])
 
 

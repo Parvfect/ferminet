@@ -356,30 +356,31 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
       new_params = optax.apply_updates(params, updates)
 
     else:
-
-      ## RK2
-      grads = 1j * grads
-      grads = constants.pmean(grads) * 0.5
-      updates, opt_state = optimizer.update(  
-        unravel_fn(grads), opt_state, params)
-      new_params = optax.apply_updates(params, updates)
-
-      (loss, aux_data), grad = loss_and_grad(
-        new_params, key, data, time + dt/2)
-      flat_grads, unravel_fn = jax.flatten_util.ravel_pytree(grad)
-      energies = aux_data.local_energy - loss
-
-      x0 = flat_grads  # Using loss grads as guess        
-      grads = jax.scipy.sparse.linalg.cg(
-        fisher_matmul, flat_grads, x0=x0, maxiter=100)[0]
       
-      grads = 1j * grads
-      grads = constants.pmean(grads)
-      updates, opt_state = optimizer.update(  
-        unravel_fn(grads), opt_state, params)
+      # RK2
+      k1 = 1j * constants.pmean(grads)
+
+      half_updates, _ = optimizer.update(unravel_fn(k1 * 0.5), opt_state, params)
+      params_mid = optax.apply_updates(params, half_updates)
+
+      (loss_mid, aux_mid), grad_mid = loss_and_grad(
+        params_mid, key, data, time + dt/2)
+      flat_grads_mid, unravel_fn = jax.flatten_util.ravel_pytree(grad_mid)
+
+      energies = aux_mid.local_energy - loss_mid
+      x0 = flat_grads_mid
+      grads_mid = jax.scipy.sparse.linalg.cg(
+          fisher_matmul, flat_grads_mid, x0=x0, maxiter=100
+      )[0]
+
+      # k2 = f(params_mid, t + dt/2)
+      k2 = 1j * constants.pmean(grads_mid)
+
+      # Step 4: Full step update with k2
+      updates, opt_state = optimizer.update(unravel_fn(k2), opt_state, params)
       new_params = optax.apply_updates(params, updates)
 
-    return new_params, opt_state, loss, aux_data
+    return new_params, opt_state, loss_mid, aux_mid
 
   return opt_update
 
