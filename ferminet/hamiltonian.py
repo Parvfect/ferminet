@@ -269,7 +269,7 @@ def potential_electric_field(pos: Array, t: int):
   E_max = 0.06
   w = 15
 
-  t = t * 0.01 # Doing dt
+  t = t # Doing dt - quite abrupt, but let's see
 
   T = 2 * 3.14 / w # period
 
@@ -282,7 +282,7 @@ def potential_electric_field(pos: Array, t: int):
       )
     )
   )
-  
+
   return - sum([
     jnp.dot(E_vec, pos[k: k+3]) * E_max * jnp.sin(w * t) * w2 for k in range(
       0, pos.shape[0], 3)])
