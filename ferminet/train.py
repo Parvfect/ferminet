@@ -346,7 +346,7 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
       #x0 = opt_state[0]  # Using previous grad as guess - have to handle pmapping first
       x0 = flat_grads  # Using loss grads as guess        
       grads = jax.scipy.sparse.linalg.cg(
-        fisher_matmul, flat_grads, x0=x0, maxiter=500)[0]
+        fisher_matmul, flat_grads, x0=x0, maxiter=2000)[0]
       
     # For TD
     if not time_dep:
@@ -370,7 +370,7 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
       energies = aux_mid.local_energy - loss_mid
       x0 = flat_grads_mid
       grads_mid = jax.scipy.sparse.linalg.cg(
-          fisher_matmul, flat_grads_mid, x0=x0, maxiter=500
+          fisher_matmul, flat_grads_mid, x0=x0, maxiter=2000
       )[0]
 
       # k2 = f(params_mid, t + dt/2)
