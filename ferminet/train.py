@@ -370,7 +370,7 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
       energies = aux_mid.local_energy - loss_mid
       x0 = flat_grads_mid
       grads_mid = jax.scipy.sparse.linalg.cg(
-          fisher_matmul, flat_grads_mid, x0=x0, maxiter=100
+          fisher_matmul, flat_grads_mid, x0=x0, maxiter=500
       )[0]
 
       # k2 = f(params_mid, t + dt/2)
