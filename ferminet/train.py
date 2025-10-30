@@ -1310,18 +1310,6 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
                        '%03.4f E_h, exp. variance=%03.4f E_h^2, pmove=%0.2f')
         logging_args = t, loss, weighted_stats.variance, pmove
 
-        if wandb_monitoring:
-          # wandb logging
-          metrics = {
-                  "mean_energy": loss,
-                  "variance": weighted_stats.variance,
-                  "dipole": dipole_mean,
-                  "dipole_std": dipole_std,
-                  "pmove": pmove
-              }
-
-          wandb.log(metrics)
-
         writer_kwargs = {
             'step': t,
             'energy': np.asarray(loss),
@@ -1345,6 +1333,19 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
             logging_args += obs_data,
         logging.info(logging_str, *logging_args)
         writer.write(t, **writer_kwargs)
+
+        
+        if wandb_monitoring:
+          # wandb logging
+          metrics = {
+                  "mean_energy": loss,
+                  "variance": weighted_stats.variance,
+                  "dipole": dipole_mean,
+                  "dipole_std": dipole_std,
+                  "pmove": pmove
+              }
+
+          wandb.log(writer_kwargs)
 
       if t % cfg.log.log_frequency == 0 and cfg.log.wandb:
 
