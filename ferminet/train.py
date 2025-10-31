@@ -278,7 +278,7 @@ def make_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
 
 
 def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
-                         optimizer, batch_network) -> OptUpdate:
+                         optimizer, batch_network, damping=1e-2) -> OptUpdate:
   """Returns an OptUpdate function for performing a parameter update."""
 
   # Differentiate wrt parameters (argument 0)
@@ -315,7 +315,7 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
       jax.vjp(f, params)[1](v))[0]
     
     def fisher_matmul(
-        v, centre_gradients=centre_gradients, damping=1e-2):
+        v, centre_gradients=centre_gradients, damping=damping):
       
       if ntk:
         log_psi_jac_v = vjp_func(v)
@@ -1114,7 +1114,8 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
       step = make_minsr_training_step(
         mcmc_step=mcmc_step,
         optimizer_step=make_minsr_opt_update_step(
-          evaluate_loss, optimizer, batch_network),
+          evaluate_loss, optimizer, batch_network,
+          damping=cfg.optim.sr.damping),
         reset_if_nan=cfg.optim.reset_if_nan,
         logabs_network=logabs_network)
     else:

@@ -122,7 +122,7 @@ def default() -> ml_collections.ConfigDict:
           },
           'sr':{
             'ntk': False,
-            'damping': 1e-4,
+            'damping': 1e-2,
             'ntk_solver': 'linear',
             'centre_gradients': True,
             'preconditioning': False,
