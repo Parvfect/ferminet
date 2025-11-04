@@ -278,17 +278,18 @@ def make_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
 
 
 def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
-                         optimizer, batch_network, damping=1e-2) -> OptUpdate:
+                         optimizer, batch_network, damping=1e-2, iterations_per_timestep=10) -> OptUpdate:
   """Returns an OptUpdate function for performing a parameter update."""
 
   # Differentiate wrt parameters (argument 0)
   loss_and_grad = jax.value_and_grad(evaluate_loss, argnums=0, has_aux=True)
-  
+
   def opt_update( 
       params: networks.ParamTree,
       data: networks.FermiNetData,
       opt_state: Optional[optax.OptState],
       minsr_state,
+      theta_dot,
       key: chex.PRNGKey,
       ntk=False,
       ntk_solver='cg',
@@ -305,9 +306,10 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
     batch_size = energies.shape[0]
   
     def f(params):
-      return batch_network(
+      psi = batch_network(
         params, data.positions, data.spins, data.atoms, data.charges)
-
+      return psi
+  
     jvp_func = lambda x: jax.linearize(f, params)[1](
       unravel_fn(x))
     
@@ -317,13 +319,8 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
     def fisher_matmul(
         v, centre_gradients=centre_gradients, damping=damping):
       
-      if ntk:
-        log_psi_jac_v = vjp_func(v)
-        update_vector =  jvp_func(v) / batch_size
-        
-      else:
-        log_psi_jac_v = jvp_func(v)
-        update_vector = vjp_func(log_psi_jac_v / batch_size)
+      log_psi_jac_v = jvp_func(v)
+      update_vector = vjp_func(log_psi_jac_v / batch_size)
         
       if centre_gradients:
           update_vector -= jnp.mean(update_vector)
@@ -331,24 +328,19 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
       update_vector += damping * v
       return update_vector
     
-    if ntk:
-      if ntk_solver =='cg':
-        grads = vjp_func(jax.scipy.sparse.linalg.cg(
-          fisher_matmul, energies)[0])
-      elif ntk_solver == 'linear':
-        grads = vjp_func(jax.lax.custom_linear_solve(
-          fisher_matmul, energies, solve=jax.numpy.linalg.solve)[0]
-        )
-      else:
-        logging.ERROR("Not implemented solver for ntk optimizer")
-        return params, opt_state, loss, aux_data
-    else:
-      #x0 = opt_state[0]  # Using previous grad as guess - have to handle pmapping first
+    if ntk_solver =='cg':
       x0 = flat_grads  # Using loss grads as guess        
       grads = jax.scipy.sparse.linalg.cg(
-        fisher_matmul, flat_grads, x0=x0, maxiter=2000)[0]
+        fisher_matmul, flat_grads, x0=x0, maxiter=200)[0]
+          
+    elif ntk_solver == 'linear':
+      grads = vjp_func(jax.lax.custom_linear_solve(
+        fisher_matmul, energies, solve=jax.numpy.linalg.solve)[0]
+      )
+    else:
+      logging.ERROR("Not implemented solver for ntk optimizer")
+      return params, opt_state, loss, aux_data
       
-    # For TD
     if not time_dep:
       grads = constants.pmean(grads)  # Handling for multi-gpu
       updates, opt_state = optimizer.update(  
@@ -356,31 +348,43 @@ def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
       new_params = optax.apply_updates(params, updates)
 
     else:
-      
-      # RK2
-      k1 = 1j * constants.pmean(grads)
+      def rk2(_):
+          k1 = 1j * constants.pmean(grads)
+          half_updates, _ = optimizer.update(unravel_fn(k1 * 0.5), opt_state, params)
+          params_mid = optax.apply_updates(params, half_updates)
 
-      half_updates, _ = optimizer.update(unravel_fn(k1 * 0.5), opt_state, params)
-      params_mid = optax.apply_updates(params, half_updates)
+          (loss_mid, aux_mid), grad_mid = loss_and_grad(params_mid, key, data, time + dt/2)
+          flat_grads_mid, unravel_fn = jax.flatten_util.ravel_pytree(grad_mid)
 
-      (loss_mid, aux_mid), grad_mid = loss_and_grad(
-        params_mid, key, data, time + dt/2)
-      flat_grads_mid, unravel_fn = jax.flatten_util.ravel_pytree(grad_mid)
+          energies = aux_mid.local_energy - loss_mid
+          x0 = flat_grads_mid
+          grads_mid = jax.scipy.sparse.linalg.cg(
+              fisher_matmul, flat_grads_mid, x0=x0, maxiter=2000
+          )[0]
 
-      energies = aux_mid.local_energy - loss_mid
-      x0 = flat_grads_mid
-      grads_mid = jax.scipy.sparse.linalg.cg(
-          fisher_matmul, flat_grads_mid, x0=x0, maxiter=2000
-      )[0]
+          k2 = 1j * constants.pmean(grads_mid)
+          updates, opt_state_ = optimizer.update(unravel_fn(k2), opt_state, params)
+          new_params = optax.apply_updates(params, updates)
 
-      # k2 = f(params_mid, t + dt/2)
-      k2 = 1j * constants.pmean(grads_mid)
+          return new_params, theta_dot  # theta_dot unchanged here
 
-      # Step 4: Full step update with k2
-      updates, opt_state = optimizer.update(unravel_fn(k2), opt_state, params)
-      new_params = optax.apply_updates(params, updates)
+      def sample_integration_at_timestep(theta_dot):
+          idx = (time + 1) % iterations_per_timestep
+          theta_dot = theta_dot.at[idx].set(grads)
+          return params, theta_dot
 
-    return new_params, opt_state, loss_mid, aux_mid
+      should_update = jnp.logical_and(
+          jnp.equal(time % iterations_per_timestep, 0),
+          jnp.logical_not(jnp.equal(time, 0))
+      )
+
+      new_params, theta_dot = jax.lax.cond(
+          should_update,
+          sample_integration_at_timestep,
+          sample_integration_at_timestep,
+          operand=theta_dot
+      )
+    return new_params, opt_state, loss, aux_data, theta_dot
 
   return opt_update
 
@@ -538,13 +542,14 @@ def make_minsr_training_step(
     update. See the Step protocol for details.
   """
   @functools.partial(constants.pmap,
-                    in_axes=(0, 0, 0, None, 0, 0),
+                    in_axes=(0, 0, 0, None, None, 0, 0),
                     donate_argnums=(0, 1, 2))
   def step(
       data: networks.FermiNetData,
       params: networks.ParamTree,
       opt_state: Optional[optax.OptState],
       minsr_state,
+      theta_dot,
       key: chex.PRNGKey,
       mcmc_width: jnp.ndarray
   ) -> StepResults:
@@ -557,10 +562,11 @@ def make_minsr_training_step(
       params, data, mcmc_key, mcmc_width)
 
     # Optimization step
-    new_params, new_state, loss, aux_data = optimizer_step(params,
+    new_params, new_state, loss, aux_data, theta_dot = optimizer_step(params,
                                                            data,
                                                            opt_state,
                                                            minsr_state,
+                                                           theta_dot,
                                                            loss_key)
     if reset_if_nan:
       new_params = jax.lax.cond(jnp.isnan(loss),
@@ -569,7 +575,7 @@ def make_minsr_training_step(
       new_state = jax.lax.cond(jnp.isnan(loss),
                                lambda: opt_state,
                                lambda: new_state)
-    return data, new_params, new_state, loss, aux_data, pmove
+    return data, new_params, new_state, loss, aux_data, pmove, theta_dot
 
   return step
 
@@ -1075,10 +1081,19 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
   elif cfg.optim.optimizer == 'minsr':
 
     if cfg.optim.sr.time_dep:
+      iterations_per_timestep = cfg.optim.sr.iterations_per_timestep
+      
       optimizer = optax.chain(
         store_last_gradient(),
         optax.scale(0.001),
         optax.scale(-1.),)
+          
+      flat_params, unravel_fn = jax.flatten_util.ravel_pytree(params)
+      print(flat_params.shape)
+      n_params = flat_params.shape[0]
+      print(n_params)
+      theta_dot = jnp.zeros((iterations_per_timestep, n_params))  
+
     else:
       optimizer = optax.chain(
         store_last_gradient(),
@@ -1115,7 +1130,8 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
         mcmc_step=mcmc_step,
         optimizer_step=make_minsr_opt_update_step(
           evaluate_loss, optimizer, batch_network,
-          damping=cfg.optim.sr.damping),
+          damping=cfg.optim.sr.damping,
+          iterations_per_timestep=cfg.optim.sr.iterations_per_timestep),
         reset_if_nan=cfg.optim.reset_if_nan,
         logabs_network=logabs_network)
     else:
@@ -1214,14 +1230,37 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
     for t in range(t_init, cfg.optim.iterations):
       sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
 
-      if cfg.optim.optimizer == 'minsr':
-        data, params, opt_state, loss, aux_data, pmove = step(
+      if cfg.optim.optimizer == 'minsr' and cfg.optim.sr.time_dep:
+        
+        rk_time = (t - t_init) // cfg.optim.sr.iterations_per_timestep
+        time_state_dict = {
+          "time": t - t_init,
+          "rk_time": rk_time
+          }
+        print("I enter here")
+        print(time_state_dict)
+        print(theta_dot.shape)
+
+        data, params, opt_state, loss, aux_data, pmove, theta_dot = step(
             data,
             params,
             opt_state,
-            {"time": t - t_init},
+            time_state_dict,
+            theta_dot,
             subkeys,
-            mcmc_width)
+            mcmc_width
+        )
+        
+        print(theta_dot.shape)
+        print(time_state_dict)
+        
+        #if rk_time == 0:
+        theta_dot = theta_dot[0]  # pmean dimension
+        mean_parameter_velocities = jnp.mean(theta_dot, axis=0)
+        var_parameter_velocities = (theta_dot - mean_parameter_velocities)**2
+        print(mean_parameter_velocities[:10])
+        print(var_parameter_velocities[:10])
+        print(jnp.mean(var_parameter_velocities))
       else:
         data, params, opt_state, loss, aux_data, pmove = step(
             data,
@@ -1233,6 +1272,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
       # due to pmean, loss, and pmove should be the same across
       # devices.
       loss = loss[0]
+      
       # per batch variance isn't informative. Use weighted mean and variance
       # instead.
       weighted_stats = statistics.exponentialy_weighted_stats(
@@ -1268,43 +1308,6 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
           else:
             raise e
           
-
-      # Dipole moment
-      # pos: (pmap_dim, n_walkers, n_electrons * 3)
-      # atoms: (pmap_dim, n_walkers, n_atoms, 3)
-
-      pos = data.positions
-      atoms = data.atoms
-
-      # 1️⃣ reshape electrons
-      pos_reshaped = pos.reshape(
-        pos.shape[0], pos.shape[1], -1, 3)  # (pmap, walkers, n_electrons, 3)
-
-      # 2️⃣ compute nuclear centroid
-      nuclear_center = jnp.mean(atoms, axis=2, keepdims=True)  # (pmap, walkers, 1, 3)
-
-      # 3️⃣ center electrons and nuclei
-      pos_centered = pos_reshaped  # electrons relative to centroid
-      atoms_centered = atoms - nuclear_center      # nuclei relative to centroid
-
-      # 4️⃣ sum dipoles
-      electron_dipole = -jnp.sum(pos_centered, axis=2)  # sum over electrons
-      #nuclear_dipole = jnp.sum(atoms_centered, axis=2)
-
-      dipole_vec = electron_dipole  # (pmap, walkers, 3)
-
-      # 5️⃣ z-component along field
-      dipole_z = dipole_vec[..., 2]
-
-      # 6️⃣ mean and std over pmap and walkers
-      dipole_mean = jnp.mean(dipole_vec)
-      dipole_std = jnp.std(dipole_vec)
-
-      print("⟨μ_z⟩ =", dipole_mean, "±", dipole_std)
-
-
-      #dipole_moment = jnp.linalg.norm(- jnp.mean(sum([pos[0,:, i: i+2] for i in range(0, pos.shape#[-1]-4, 3)])) + jnp.mean(sum([atoms[0,:, i] for i in range(atoms.shape[2])])))
-
       # Logging
       if t % cfg.log.stats_frequency == 0:
         logging_str = ('Step %05d: '
@@ -1341,8 +1344,6 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
           metrics = {
                   "mean_energy": loss,
                   "variance": weighted_stats.variance,
-                  "dipole": dipole_mean,
-                  "dipole_std": dipole_std,
                   "pmove": pmove
               }
 
