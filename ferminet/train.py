@@ -37,7 +37,9 @@ from ferminet.utils import statistics
 from ferminet.utils import system
 from ferminet.utils import utils
 from ferminet.utils import writers
-from ferminet.minsr import MinSR
+from ferminet.stochastic_reconfiguration import \
+  make_sr_opt_update_step, make_sr_training_step
+from ferminet.time_evolution import make_td_opt_update_step, make_time_evolution_step
 from ferminet.training_monitoring import wandb_login, start_wandb_run
 from ferminet.visual_tools import \
   plot_electron_histograms, plot_combined_electron_positions, plot_electron_presence_map
@@ -242,7 +244,6 @@ class Step(Protocol):
         pmove: probability that a proposed MCMC move was accepted.
     """
 
-
 def null_update(
     params: networks.ParamTree,
     data: networks.FermiNetData,
@@ -277,118 +278,6 @@ def make_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
   return opt_update
 
 
-def make_minsr_opt_update_step(evaluate_loss: qmc_loss_functions.LossFn,
-                         optimizer, batch_network, damping=1e-2, iterations_per_timestep=10) -> OptUpdate:
-  """Returns an OptUpdate function for performing a parameter update."""
-
-  # Differentiate wrt parameters (argument 0)
-  loss_and_grad = jax.value_and_grad(evaluate_loss, argnums=0, has_aux=True)
-
-  def opt_update( 
-      params: networks.ParamTree,
-      data: networks.FermiNetData,
-      opt_state: Optional[optax.OptState],
-      minsr_state,
-      theta_dot,
-      key: chex.PRNGKey,
-      ntk=False,
-      ntk_solver='cg',
-      centre_gradients=True,
-      time_dep=True,
-      dt=0.01
-  ) -> OptUpdateResults:
-    """Evaluates the loss and gradients and updates the parameters using optax."""
-
-    time = minsr_state['time']
-    (loss, aux_data), grad = loss_and_grad(params, key, data, time)
-    flat_grads, unravel_fn = jax.flatten_util.ravel_pytree(grad)
-    energies = aux_data.local_energy - loss
-    batch_size = energies.shape[0]
-  
-    def f(params):
-      psi = batch_network(
-        params, data.positions, data.spins, data.atoms, data.charges)
-      return psi
-  
-    jvp_func = lambda x: jax.linearize(f, params)[1](
-      unravel_fn(x))
-    
-    vjp_func = lambda v: jax.flatten_util.ravel_pytree(
-      jax.vjp(f, params)[1](v))[0]
-    
-    def fisher_matmul(
-        v, centre_gradients=centre_gradients, damping=damping):
-      
-      log_psi_jac_v = jvp_func(v)
-      update_vector = vjp_func(log_psi_jac_v / batch_size)
-        
-      if centre_gradients:
-          update_vector -= jnp.mean(update_vector)
-      
-      update_vector += damping * v
-      return update_vector
-    
-    if ntk_solver =='cg':
-      x0 = flat_grads  # Using loss grads as guess        
-      grads = jax.scipy.sparse.linalg.cg(
-        fisher_matmul, flat_grads, x0=x0, maxiter=200)[0]
-          
-    elif ntk_solver == 'linear':
-      grads = vjp_func(jax.lax.custom_linear_solve(
-        fisher_matmul, energies, solve=jax.numpy.linalg.solve)[0]
-      )
-    else:
-      logging.ERROR("Not implemented solver for ntk optimizer")
-      return params, opt_state, loss, aux_data
-      
-    if not time_dep:
-      grads = constants.pmean(grads)  # Handling for multi-gpu
-      updates, opt_state = optimizer.update(  
-        unravel_fn(grads), opt_state, params)
-      new_params = optax.apply_updates(params, updates)
-
-    else:
-      def rk2(_):
-          k1 = 1j * constants.pmean(grads)
-          half_updates, _ = optimizer.update(unravel_fn(k1 * 0.5), opt_state, params)
-          params_mid = optax.apply_updates(params, half_updates)
-
-          (loss_mid, aux_mid), grad_mid = loss_and_grad(params_mid, key, data, time + dt/2)
-          flat_grads_mid, unravel_fn = jax.flatten_util.ravel_pytree(grad_mid)
-
-          energies = aux_mid.local_energy - loss_mid
-          x0 = flat_grads_mid
-          grads_mid = jax.scipy.sparse.linalg.cg(
-              fisher_matmul, flat_grads_mid, x0=x0, maxiter=2000
-          )[0]
-
-          k2 = 1j * constants.pmean(grads_mid)
-          updates, opt_state_ = optimizer.update(unravel_fn(k2), opt_state, params)
-          new_params = optax.apply_updates(params, updates)
-
-          return new_params, theta_dot  # theta_dot unchanged here
-
-      def sample_integration_at_timestep(theta_dot):
-          idx = (time + 1) % iterations_per_timestep
-          theta_dot = theta_dot.at[idx].set(grads)
-          return params, theta_dot
-
-      should_update = jnp.logical_and(
-          jnp.equal(time % iterations_per_timestep, 0),
-          jnp.logical_not(jnp.equal(time, 0))
-      )
-
-      new_params, theta_dot = jax.lax.cond(
-          should_update,
-          sample_integration_at_timestep,
-          sample_integration_at_timestep,
-          operand=theta_dot
-      )
-    return new_params, opt_state, loss, aux_data, theta_dot
-
-  return opt_update
-
-  
 def make_loss_step(evaluate_loss: qmc_loss_functions.LossFn) -> OptUpdate:
   """Returns an OptUpdate function for evaluating the loss."""
 
@@ -520,88 +409,10 @@ def make_kfac_training_step(
 
   return step
 
+#### Helper functions for train - put into another file ###
 
-def make_minsr_training_step(
-    mcmc_step,
-    optimizer_step: OptUpdate,
-    logabs_network,
-    reset_if_nan: bool = False,
-) -> Step:
-  """Factory to create traning step for non-KFAC optimizers.
-
-  Args:
-    mcmc_step: Callable which performs the set of MCMC steps. See make_mcmc_step
-      for creating the callable.
-    optimizer_step: OptUpdate callable which evaluates the forward and backward
-      passes and updates the parameters and optimizer state, as required.
-    reset_if_nan: If true, reset the params and opt state to the state at the
-      previous step when the loss is NaN
-
-  Returns:
-    step, a callable which performs a set of MCMC steps and then an optimization
-    update. See the Step protocol for details.
-  """
-  @functools.partial(constants.pmap,
-                    in_axes=(0, 0, 0, None, None, 0, 0),
-                    donate_argnums=(0, 1, 2))
-  def step(
-      data: networks.FermiNetData,
-      params: networks.ParamTree,
-      opt_state: Optional[optax.OptState],
-      minsr_state,
-      theta_dot,
-      key: chex.PRNGKey,
-      mcmc_width: jnp.ndarray
-  ) -> StepResults:
-    """A full update iteration (except for KFAC): MCMC steps + optimization."""
-    # MCMC loop
-    mcmc_key, loss_key = jax.random.split(key, num=2)
-    
-    #mcmc_keys, loss_keys = kfac_jax.utils.p_split(key)
-    data, pmove = mcmc_step(
-      params, data, mcmc_key, mcmc_width)
-
-    # Optimization step
-    new_params, new_state, loss, aux_data, theta_dot = optimizer_step(params,
-                                                           data,
-                                                           opt_state,
-                                                           minsr_state,
-                                                           theta_dot,
-                                                           loss_key)
-    if reset_if_nan:
-      new_params = jax.lax.cond(jnp.isnan(loss),
-                                lambda: params,
-                                lambda: new_params)
-      new_state = jax.lax.cond(jnp.isnan(loss),
-                               lambda: opt_state,
-                               lambda: new_state)
-    return data, new_params, new_state, loss, aux_data, pmove, theta_dot
-
-  return step
-
-
-
-def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=True):
-  """Runs training loop for QMC.
-
-  Args:
-    cfg: ConfigDict containing the system and training parameters to run on. See
-      base_config.default for more details.
-    writer_manager: context manager with a write method for logging output. If
-      None, a default writer (ferminet.utils.writers.Writer) is used.
-
-  Raises:
-    ValueError: if an illegal or unsupported value in cfg is detected.
-  """
-  print(f"cfg.optim.optimizer = {repr(cfg.optim.optimizer)}")
-
-  # Setting up wandb tracking
-  if wandb_monitoring:
-    setup_wandb(running_on_hpc=False, config=cfg.to_dict())
-
-  jax.config.update('jax_disable_jit', True)  # Disabling jit to check if its causing OOM
-
-  # Device logging
+def device_setup(cfg):
+    # Device logging
   num_devices = jax.local_device_count()
   num_hosts = jax.device_count() // num_devices
   num_states = cfg.system.get('states', 0) or 1  # avoid 0/1 confusion
@@ -616,59 +427,12 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
   device_batch_size = host_batch_size // num_devices  # batch size per device
   data_shape = (num_devices, device_batch_size)
 
-  # Check if mol is a pyscf molecule and convert to internal representation
-  if cfg.system.pyscf_mol:
-    cfg.update(
-        system.pyscf_mol_to_internal_representation(cfg.system.pyscf_mol))
+  return num_devices, num_hosts, num_states, host_batch_size, total_host_batch_size, device_batch_size, data_shape
 
-  # Convert mol config into array of atomic positions and charges
-  atoms = jnp.stack([jnp.array(atom.coords) for atom in cfg.system.molecule])
+
+def get_feature_layer(cfg):
+  
   charges = jnp.array([atom.charge for atom in cfg.system.molecule])
-  nspins = cfg.system.electrons
-
-  # Generate atomic configurations for each walker
-  batch_atoms = jnp.tile(atoms[None, ...], [device_batch_size, 1, 1])
-  batch_atoms = kfac_jax.utils.replicate_all_local_devices(batch_atoms)
-  batch_charges = jnp.tile(charges[None, ...], [device_batch_size, 1])
-  batch_charges = kfac_jax.utils.replicate_all_local_devices(batch_charges)
-
-  if cfg.debug.deterministic:
-    seed = 23
-  else:
-    seed = jnp.asarray([1e6 * time.time()])
-    seed = int(multihost_utils.broadcast_one_to_all(seed)[0])
-  key = jax.random.PRNGKey(seed)
-
-  # extract number of electrons of each spin around each atom removed because
-  # of pseudopotentials
-  if cfg.system.pyscf_mol:
-    cfg.system.pyscf_mol.build()
-    core_electrons = {
-        atom: ecp_table[0]
-        for atom, ecp_table in cfg.system.pyscf_mol._ecp.items()  # pylint: disable=protected-access
-    }
-    ecp = cfg.system.pyscf_mol.ecp
-  else:
-    ecp = {}
-    core_electrons = {}
-
-  # Create parameters, network, and vmaped/pmaped derivations
-
-  if cfg.pretrain.method == 'hf' and cfg.pretrain.iterations > 0:
-    hartree_fock = pretrain.get_hf(
-        pyscf_mol=cfg.system.get('pyscf_mol'),
-        molecule=cfg.system.molecule,
-        nspins=nspins,
-        restricted=False,
-        basis=cfg.pretrain.basis,
-        ecp=ecp,
-        core_electrons=core_electrons,
-        states=cfg.system.states,
-        excitation_type=cfg.pretrain.get('excitation_type', 'ordered'))
-    # broadcast the result of PySCF from host 0 to all other hosts
-    hartree_fock.mean_field.mo_coeff = multihost_utils.broadcast_one_to_all(
-        hartree_fock.mean_field.mo_coeff
-    )
 
   if cfg.network.make_feature_layer_fn:
     feature_layer_module, feature_layer_fn = (
@@ -690,6 +454,9 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
         rescale_inputs=cfg.network.get('rescale_inputs', False),
     )
 
+  return feature_layer
+
+def get_envelope(cfg):
   if cfg.network.make_envelope_fn:
     envelope_module, envelope_fn = (
         cfg.network.make_envelope_fn.rsplit('.', maxsplit=1))
@@ -698,8 +465,19 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
     envelope = make_envelope(**cfg.network.make_envelope_kwargs)  # type: envelopes.Envelope
   else:
     envelope = envelopes.make_isotropic_envelope()
+  return envelope
 
+
+def get_network(cfg, key):
+
+  feature_layer = get_feature_layer(cfg)
+  envelope = get_envelope(cfg)
+  
   use_complex = cfg.network.get('complex', False)
+
+  charges = jnp.array([atom.charge for atom in cfg.system.molecule])
+  nspins = cfg.system.electrons
+
   if cfg.network.network_type == 'ferminet':
     network = networks.make_fermi_net(
         nspins,
@@ -717,6 +495,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
         **cfg.network.ferminet,
     )
   elif cfg.network.network_type == 'psiformer':
+
     network = psiformer.make_fermi_net(
         nspins,
         charges,
@@ -731,11 +510,12 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
         complex_output=use_complex,
         **cfg.network.psiformer,
     )
+  
   key, subkey = jax.random.split(key)
   params = network.init(subkey)
   params = kfac_jax.utils.replicate_all_local_devices(params)
   signed_network = network.apply
-  # Often just need log|psi(x)|.
+
   if cfg.system.get('states', 0):
     if cfg.optim.objective == 'vmc_overlap':
       logabs_network = networks.make_state_trace(signed_network,
@@ -747,102 +527,24 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
                                      complex_output=use_complex), 1)
   else:
     logabs_network = lambda *args, **kwargs: signed_network(*args, **kwargs)[1]
+  
   batch_network = jax.vmap(
       logabs_network, in_axes=(None, 0, 0, 0, 0), out_axes=0
   )  # batched network
 
-  # Exclusively when computing the gradient wrt the energy for complex
-  # wavefunctions, it is necessary to have log(psi) rather than log(|psi|).
-  # This is unused if the wavefunction is real-valued.
-  if cfg.system.get('states', 0):
-    if cfg.optim.objective == 'vmc_overlap':
-      # In the case of a penalty method, we actually need all outputs
-      # to compute the gradient
-      log_network_for_loss = networks.make_state_matrix(signed_network,
-                                                        cfg.system.states)
-      def log_network(*args, **kwargs):
-        phase, mag = log_network_for_loss(*args, **kwargs)
-        return mag + 1.j * phase
-    else:
-      def log_network(*args, **kwargs):
-        if not use_complex:
-          raise ValueError('This function should never be used if the '
-                           'wavefunction is real-valued.')
-        meta_net = networks.make_total_ansatz(signed_network,
-                                              cfg.system.get('states', 0),
-                                              complex_output=True)
-        phase, mag = meta_net(*args, **kwargs)
-        return mag + 1.j * phase
-  else:
-    def log_network(*args, **kwargs):
-      if not use_complex:
-        raise ValueError('This function should never be used if the '
-                         'wavefunction is real-valued.')
-      phase, mag = signed_network(*args, **kwargs)
-      return mag + 1.j * phase
+  return network, params, signed_network, logabs_network, batch_network
 
-  # Set up checkpointing and restore params/data if necessary
-  # Mirror behaviour of checkpoints in TF FermiNet.
-  # Checkpoints are saved to save_path.
-  # When restoring, we first check for a checkpoint in save_path. If none are
-  # found, then we check in restore_path.  This enables calculations to be
-  # started from a previous calculation but then resume from their own
-  # checkpoints in the event of pre-emption.
 
-  ckpt_save_path = checkpoint.create_save_path(cfg.log.save_path)
-  ckpt_restore_path = checkpoint.get_restore_path(cfg.log.restore_path)
+def get_observable_functions(
+    cfg, data, signed_network, ckpt_save_path, density_state_ckpt):
 
-  ckpt_restore_filename = (
-      checkpoint.find_last_checkpoint(ckpt_save_path) or
-      checkpoint.find_last_checkpoint(ckpt_restore_path))
-
-  if ckpt_restore_filename and cfg.log.restore_from_checkpoint:
-    (t_init,
-     data,
-     params,
-     opt_state_ckpt,
-     mcmc_width_ckpt,
-     density_state_ckpt) = checkpoint.restore(
-         ckpt_restore_filename, host_batch_size)
-  else:
-    logging.info('No checkpoint found. Training new model.')
-    key, subkey = jax.random.split(key)
-    # make sure data on each host is initialized differently
-    subkey = jax.random.fold_in(subkey, jax.process_index())
-    # create electron state (position and spin)
-    pos, spins = init_electrons(
-        subkey,
-        cfg.system.molecule,
-        cfg.system.electrons,
-        batch_size=total_host_batch_size,
-        init_width=cfg.mcmc.init_width,
-        core_electrons=core_electrons,
-    )
-    # For excited states, each device has a batch of walkers, where each walker
-    # is nstates * nelectrons. The vmap over nstates is handled in the function
-    # created in make_total_ansatz
-    pos = jnp.reshape(pos, data_shape + (-1,))
-    pos = kfac_jax.utils.broadcast_all_local_devices(pos)
-    spins = jnp.reshape(spins, data_shape + (-1,))
-    spins = kfac_jax.utils.broadcast_all_local_devices(spins)
-    data = networks.FermiNetData(
-        positions=pos, spins=spins, atoms=batch_atoms, charges=batch_charges
-    )
-
-    t_init = 0
-    opt_state_ckpt = None
-    mcmc_width_ckpt = None
-    density_state_ckpt = None
+  density_update, s2_matrix_file, dipole_matrix_file, density_matrix_file = None, None, None, None
+  nspins = cfg.system.electrons
+  observable_fns = {}
+  observable_states = {}  # only relevant for density matrix
 
   # Set up logging and observables
   train_schema = ['step', 'energy', 'ewmean', 'ewvar', 'pmove']
-
-  if cfg.system.states:
-    energy_matrix_file = open(
-        os.path.join(ckpt_save_path, 'energy_matrix.npy'), 'ab')
-
-  observable_fns = {}
-  observable_states = {}  # only relevant for density matrix
   if cfg.observables.s2:
     observable_fns['s2'] = observables.make_s2(
         signed_network,
@@ -864,7 +566,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
           os.path.join(ckpt_save_path, 'dipole_matrix.npy'), 'ab')
   # Do this *before* creating density matrix function, as that is a special case
   observable_fns = observables.make_observable_fns(observable_fns)
-
+  
   if cfg.observables.density:
     (observable_states['density'],
      density_update,
@@ -885,53 +587,201 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
                              in_axes=(0, 0, pmap_density_axes))
     observable_fns['density'] = lambda *a, **kw: pmap_fn(*a, **kw).mean(0)
 
-  # Initialisation done. We now want to have different PRNG streams on each
-  # device. Shard the key over devices
-  sharded_key = kfac_jax.utils.make_different_rng_key_on_all_devices(key)
+  return observable_fns, observable_states, density_update, s2_matrix_file, dipole_matrix_file, density_matrix_file, train_schema
 
-  # Pretraining to match Hartree-Fock
 
-  if (
-      t_init == 0
-      and cfg.pretrain.method == 'hf'
-      and cfg.pretrain.iterations > 0
-  ):
-    pretrain_spins = spins[0, 0]
-    batch_orbitals = jax.vmap(
-        network.orbitals, in_axes=(None, 0, 0, 0, 0), out_axes=0
+def optimizer_setup(
+    cfg, params, data, opt_state_ckpt, evaluate_loss, sharded_key):
+  # Construct and setup optimizer
+  
+  theta_dot, opt_state = None, None
+
+  def learning_rate_schedule(
+      t_: jnp.ndarray) -> jnp.ndarray:
+      return cfg.optim.lr.rate * jnp.power(
+          (1.0 / (1.0 + (t_/cfg.optim.lr.delay))), cfg.optim.lr.decay)
+
+  if cfg.optim.optimizer == 'none':
+    optimizer = None
+  elif cfg.optim.optimizer == 'adam':
+    optimizer = optax.chain(
+        optax.scale_by_adam(**cfg.optim.adam),
+        optax.scale_by_schedule(learning_rate_schedule),
+        optax.scale(-1.))
+  elif cfg.optim.optimizer == 'lamb':
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.scale_by_adam(eps=1e-7),
+        optax.scale_by_trust_ratio(),
+        optax.scale_by_schedule(learning_rate_schedule),
+        optax.scale(-1))
+  elif cfg.optim.optimizer == 'kfac':
+    # Differentiate wrt parameters (argument 0)
+    val_and_grad = jax.value_and_grad(evaluate_loss, argnums=0, has_aux=True)
+    optimizer = kfac_jax.Optimizer(
+        val_and_grad,
+        l2_reg=cfg.optim.kfac.l2_reg,
+        norm_constraint=cfg.optim.kfac.norm_constraint,
+        value_func_has_aux=True,
+        value_func_has_rng=True,
+        learning_rate_schedule=learning_rate_schedule,
+        curvature_ema=cfg.optim.kfac.cov_ema_decay,
+        inverse_update_period=cfg.optim.kfac.invert_every,
+        min_damping=cfg.optim.kfac.min_damping,
+        num_burnin_steps=0,
+        register_only_generic=cfg.optim.kfac.register_only_generic,
+        estimation_mode='fisher_exact',
+        multi_device=True,
+        pmap_axis_name=constants.PMAP_AXIS_NAME,
+        auto_register_kwargs=dict(
+            graph_patterns=curvature_tags_and_blocks.GRAPH_PATTERNS,
+        ),
+        # debug=True
     )
     sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
-    params, data.positions = pretrain.pretrain_hartree_fock(
-        params=params,
-        positions=data.positions,
-        spins=pretrain_spins,
-        atoms=data.atoms,
-        charges=data.charges,
-        batch_network=batch_network,
-        batch_orbitals=batch_orbitals,
-        network_options=network.options,
-        sharded_key=subkeys,
-        electrons=cfg.system.electrons,
-        scf_approx=hartree_fock,
-        iterations=cfg.pretrain.iterations,
-        batch_size=device_batch_size,
-        scf_fraction=cfg.pretrain.get('scf_fraction', 0.0),
-        states=cfg.system.states,
+    opt_state = optimizer.init(params, subkeys, data)
+    opt_state = opt_state_ckpt or opt_state  # avoid overwriting ckpted state
+
+  elif cfg.optim.optimizer == 'sr' or cfg.td.time_evolution:
+
+    if cfg.td.time_evolution:
+      iterations_per_timestep = cfg.optim.sr.iterations_per_timestep
+      dt = cfg.td.dt
+      
+      optimizer = optax.chain(
+        store_last_gradient(),
+        optax.scale(dt),
+        optax.scale(-1.),)
+          
+      #flat_params, unravel_fn = jax.flatten_util.ravel_pytree(params)
+      #n_params = flat_params.shape[0]
+      #theta_dot = jnp.zeros((iterations_per_timestep, n_params))  
+
+    else:
+      optimizer = optax.chain(
+        store_last_gradient(),
+        optax.scale_by_schedule(learning_rate_schedule),
+        optax.scale(-1.),)
+  else:
+    raise ValueError(f'Not a recognized optimizer: {cfg.optim.optimizer}')
+
+  return optimizer, theta_dot, opt_state
+
+
+def get_training_step_function(
+    cfg, optimizer, mcmc_step, evaluate_loss, params, opt_state_ckpt, batch_network,
+    opt_state):
+  
+  if not optimizer:
+    opt_state = None
+    step = make_training_step(
+        mcmc_step=mcmc_step,
+        optimizer_step=make_loss_step(evaluate_loss))
+    
+  elif isinstance(optimizer, optax.GradientTransformation):
+    # optax/optax-compatible optimizer (ADAM, LAMB, ...)
+    opt_state = jax.pmap(optimizer.init)(params)
+
+
+    if cfg.td.time_evolution:
+      accumulate_samples, conduct_timestep = make_td_opt_update_step(
+        evaluate_loss, batch_network, cfg.td.damping, cfg.td.iterations_per_timestep
+      )
+      step = make_time_evolution_step(
+        mcmc_step=mcmc_step, optimizer=optimizer,
+        accumulate_samples=accumulate_samples, conduct_timestep=conduct_timestep,
+        iterations_per_timestep=cfg.td.iterations_per_timestep
+      )
+
+      
+    elif cfg.optim.optimizer == 'sr':  # For now while I'm using optax
+      
+      if not cfg.td.time_evolution or cfg.optim.optimzer == 'sr':  # Be careful with this game!
+        opt_state = opt_state_ckpt or opt_state  # avoid overwriting ckpted state
+
+      if opt_state_ckpt is not None and not cfg.td.time_evolution:  # Tricky for td
+        opt_state = tuple(opt_state_ckpt)
+      
+      step = make_sr_training_step(
+        mcmc_step=mcmc_step,
+        optimizer_step=make_sr_opt_update_step(
+          evaluate_loss, optimizer, batch_network,
+          damping=cfg.optim.sr.damping),
+        reset_if_nan=cfg.optim.reset_if_nan)
+    
+    elif isinstance(optimizer, kfac_jax.Optimizer):
+      step = make_kfac_training_step(
+          mcmc_step=mcmc_step,
+          damping=cfg.optim.kfac.damping,
+          optimizer=optimizer,
+          reset_if_nan=cfg.optim.reset_if_nan)
+    else:
+      step = make_training_step(
+          mcmc_step=mcmc_step,
+          optimizer_step=make_opt_update_step(evaluate_loss, optimizer),
+          reset_if_nan=cfg.optim.reset_if_nan)
+  
+  return step, opt_state
+  
+
+def get_loss_function(
+    cfg, log_network, logabs_network, local_energy, log_network_for_loss):
+  
+  use_complex = cfg.network.get('complex', False)
+  overlap_weight = None
+
+  if cfg.optim.objective == 'vmc':
+    evaluate_loss = qmc_loss_functions.make_loss(
+        log_network if use_complex else logabs_network,
+        local_energy,
+        clip_local_energy=cfg.optim.clip_local_energy,
+        clip_from_median=cfg.optim.clip_median,
+        center_at_clipped_energy=cfg.optim.center_at_clip,
+        complex_output=use_complex,
+        max_vmap_batch_size=cfg.optim.get('max_vmap_batch_size', 0),
     )
+  elif cfg.optim.objective == 'wqmc':
+    evaluate_loss = qmc_loss_functions.make_wqmc_loss(
+        log_network if use_complex else logabs_network,
+        local_energy,
+        clip_local_energy=cfg.optim.clip_local_energy,
+        clip_from_median=cfg.optim.clip_median,
+        center_at_clipped_energy=cfg.optim.center_at_clip,
+        complex_output=use_complex,
+        max_vmap_batch_size=cfg.optim.get('max_vmap_batch_size', 0),
+        vmc_weight=cfg.optim.get('vmc_weight', 1.0)
+    )
+  elif cfg.optim.objective == 'vmc_overlap':
+    if not cfg.system.states:
+      raise ValueError('Overlap penalty only works with excited states')
+    if cfg.optim.overlap.weights is None:
+      overlap_weight = tuple([1./(1.+x) for x in range(cfg.system.states)])
+      overlap_weight = tuple([x/sum(overlap_weight) for x in overlap_weight])
+    else:
+      assert len(cfg.optim.overlap.weights) == cfg.system.states
+      overlap_weight = cfg.optim.overlap.weights
+    evaluate_loss = qmc_loss_functions.make_energy_overlap_loss(
+        log_network_for_loss,
+        local_energy,
+        clip_local_energy=cfg.optim.clip_local_energy,
+        clip_from_median=cfg.optim.clip_median,
+        center_at_clipped_energy=cfg.optim.center_at_clip,
+        overlap_penalty=cfg.optim.overlap.penalty,
+        overlap_weight=overlap_weight,
+        complex_output=cfg.network.get('complex', False),
+        max_vmap_batch_size=cfg.optim.get('max_vmap_batch_size', 0))
+  else:
+    raise ValueError(f'Not a recognized objective: {cfg.optim.objective}')
+  
+  return evaluate_loss, overlap_weight
 
-  # Main training
+def make_local_energy_functions(cfg, signed_network, charges):
 
-  # Construct MCMC step
-  atoms_to_mcmc = atoms if cfg.mcmc.scale_by_nuclear_distance else None
-  mcmc_step = mcmc.make_mcmc_step(
-      batch_network,
-      device_batch_size,
-      steps=cfg.mcmc.steps,
-      atoms=atoms_to_mcmc,
-      blocks=cfg.mcmc.blocks * num_states,
-  )
-  # Construct loss and optimizer
+  nspins=cfg.system.electrons
+  use_complex = cfg.network.get('complex', False)
+
   laplacian_method = cfg.optim.get('laplacian', 'default')
+  
   if cfg.system.make_local_energy_fn:
     if laplacian_method != 'default':
       raise NotImplementedError(f'Laplacian method {laplacian_method}'
@@ -986,175 +836,252 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
   else:
     local_energy = local_energy_fn
 
-  if cfg.optim.objective == 'vmc':
-    evaluate_loss = qmc_loss_functions.make_loss(
-        log_network if use_complex else logabs_network,
-        local_energy,
-        clip_local_energy=cfg.optim.clip_local_energy,
-        clip_from_median=cfg.optim.clip_median,
-        center_at_clipped_energy=cfg.optim.center_at_clip,
-        complex_output=use_complex,
-        max_vmap_batch_size=cfg.optim.get('max_vmap_batch_size', 0),
-    )
-  elif cfg.optim.objective == 'wqmc':
-    evaluate_loss = qmc_loss_functions.make_wqmc_loss(
-        log_network if use_complex else logabs_network,
-        local_energy,
-        clip_local_energy=cfg.optim.clip_local_energy,
-        clip_from_median=cfg.optim.clip_median,
-        center_at_clipped_energy=cfg.optim.center_at_clip,
-        complex_output=use_complex,
-        max_vmap_batch_size=cfg.optim.get('max_vmap_batch_size', 0),
-        vmc_weight=cfg.optim.get('vmc_weight', 1.0)
-    )
-  elif cfg.optim.objective == 'vmc_overlap':
-    if not cfg.system.states:
-      raise ValueError('Overlap penalty only works with excited states')
-    if cfg.optim.overlap.weights is None:
-      overlap_weight = tuple([1./(1.+x) for x in range(cfg.system.states)])
-      overlap_weight = tuple([x/sum(overlap_weight) for x in overlap_weight])
+  return local_energy
+
+def conduct_pretraining_hf(
+    cfg, t_init, spins, network, params, data, batch_network, device_batch_size,
+    sharded_key):
+  
+  if (
+      t_init == 0
+      and cfg.pretrain.method == 'hf'
+      and cfg.pretrain.iterations > 0
+    ):
+    nspins = cfg.system.electrons
+
+    if cfg.system.pyscf_mol:
+      cfg.system.pyscf_mol.build()
+      core_electrons = {
+          atom: ecp_table[0]
+          for atom, ecp_table in cfg.system.pyscf_mol._ecp.items()  # pylint: disable=protected-access
+      }
+      ecp = cfg.system.pyscf_mol.ecp
     else:
-      assert len(cfg.optim.overlap.weights) == cfg.system.states
-      overlap_weight = cfg.optim.overlap.weights
-    evaluate_loss = qmc_loss_functions.make_energy_overlap_loss(
-        log_network_for_loss,
-        local_energy,
-        clip_local_energy=cfg.optim.clip_local_energy,
-        clip_from_median=cfg.optim.clip_median,
-        center_at_clipped_energy=cfg.optim.center_at_clip,
-        overlap_penalty=cfg.optim.overlap.penalty,
-        overlap_weight=overlap_weight,
-        complex_output=cfg.network.get('complex', False),
-        max_vmap_batch_size=cfg.optim.get('max_vmap_batch_size', 0))
+      ecp = {}
+      core_electrons = {}
+
+    if cfg.pretrain.method == 'hf' and cfg.pretrain.iterations > 0:
+      hartree_fock = pretrain.get_hf(
+          pyscf_mol=cfg.system.get('pyscf_mol'),
+          molecule=cfg.system.molecule,
+          nspins=nspins,
+          restricted=False,
+          basis=cfg.pretrain.basis,
+          ecp=ecp,
+          core_electrons=core_electrons,
+          states=cfg.system.states,
+          excitation_type=cfg.pretrain.get('excitation_type', 'ordered'))
+      # broadcast the result of PySCF from host 0 to all other hosts
+      hartree_fock.mean_field.mo_coeff = multihost_utils.broadcast_one_to_all(
+          hartree_fock.mean_field.mo_coeff
+      )
+
+      pretrain_spins = spins[0, 0]
+      batch_orbitals = jax.vmap(
+          network.orbitals, in_axes=(None, 0, 0, 0, 0), out_axes=0
+      )
+      sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
+      params, data.positions = pretrain.pretrain_hartree_fock(
+          params=params,
+          positions=data.positions,
+          spins=pretrain_spins,
+          atoms=data.atoms,
+          charges=data.charges,
+          batch_network=batch_network,
+          batch_orbitals=batch_orbitals,
+          network_options=network.options,
+          sharded_key=subkeys,
+          electrons=cfg.system.electrons,
+          scf_approx=hartree_fock,
+          iterations=cfg.pretrain.iterations,
+          batch_size=device_batch_size,
+          scf_fraction=cfg.pretrain.get('scf_fraction', 0.0),
+          states=cfg.system.states,
+      )
+  return params, data
+
+def train(
+    cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=True):
+  """Runs training loop for QMC.
+
+  Args:
+    cfg: ConfigDict containing the system and training parameters to run on. See
+      base_config.default for more details.
+    writer_manager: context manager with a write method for logging output. If
+      None, a default writer (ferminet.utils.writers.Writer) is used.
+
+  Raises:
+    ValueError: if an illegal or unsupported value in cfg is detected.
+  """
+
+  if cfg.log.wandb:
+    setup_wandb(running_on_hpc=False, config=cfg.to_dict())
+
+  num_devices, num_hosts, num_states, host_batch_size, total_host_batch_size, device_batch_size, data_shape = device_setup(cfg)
+  logging.info("Device setup")
+
+  # Check if mol is a pyscf molecule and convert to internal representation
+
+  # Convert mol config into array of atomic positions and charges
+  atoms = jnp.stack([jnp.array(atom.coords) for atom in cfg.system.molecule])
+  charges = jnp.array([atom.charge for atom in cfg.system.molecule])
+  nspins = cfg.system.electrons
+
+  # Generate atomic configurations for each walker
+  batch_atoms = jnp.tile(atoms[None, ...], [device_batch_size, 1, 1])
+  batch_atoms = kfac_jax.utils.replicate_all_local_devices(batch_atoms)
+  batch_charges = jnp.tile(charges[None, ...], [device_batch_size, 1])
+  batch_charges = kfac_jax.utils.replicate_all_local_devices(batch_charges)
+
+  if cfg.debug.deterministic:
+    seed = 23
   else:
-    raise ValueError(f'Not a recognized objective: {cfg.optim.objective}')
+    seed = jnp.asarray([1e6 * time.time()])
+    seed = int(multihost_utils.broadcast_one_to_all(seed)[0])
+  key = jax.random.PRNGKey(seed)
 
-  # Compute the learning rate
-  def learning_rate_schedule(t_: jnp.ndarray) -> jnp.ndarray:
-    return cfg.optim.lr.rate * jnp.power(
-        (1.0 / (1.0 + (t_/cfg.optim.lr.delay))), cfg.optim.lr.decay)
+  # Create parameters, network, and vmaped/pmaped derivations
+  network, params, signed_network, logabs_network, batch_network = get_network(
+    cfg, key)
+  logging.info("Network initialized")
 
-  # Construct and setup optimizer
-  if cfg.optim.optimizer == 'none':
-    optimizer = None
-  elif cfg.optim.optimizer == 'adam':
-    optimizer = optax.chain(
-        optax.scale_by_adam(**cfg.optim.adam),
-        optax.scale_by_schedule(learning_rate_schedule),
-        optax.scale(-1.))
-  elif cfg.optim.optimizer == 'lamb':
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(1.0),
-        optax.scale_by_adam(eps=1e-7),
-        optax.scale_by_trust_ratio(),
-        optax.scale_by_schedule(learning_rate_schedule),
-        optax.scale(-1))
-  elif cfg.optim.optimizer == 'kfac':
-    # Differentiate wrt parameters (argument 0)
-    val_and_grad = jax.value_and_grad(evaluate_loss, argnums=0, has_aux=True)
-    optimizer = kfac_jax.Optimizer(
-        val_and_grad,
-        l2_reg=cfg.optim.kfac.l2_reg,
-        norm_constraint=cfg.optim.kfac.norm_constraint,
-        value_func_has_aux=True,
-        value_func_has_rng=True,
-        learning_rate_schedule=learning_rate_schedule,
-        curvature_ema=cfg.optim.kfac.cov_ema_decay,
-        inverse_update_period=cfg.optim.kfac.invert_every,
-        min_damping=cfg.optim.kfac.min_damping,
-        num_burnin_steps=0,
-        register_only_generic=cfg.optim.kfac.register_only_generic,
-        estimation_mode='fisher_exact',
-        multi_device=True,
-        pmap_axis_name=constants.PMAP_AXIS_NAME,
-        auto_register_kwargs=dict(
-            graph_patterns=curvature_tags_and_blocks.GRAPH_PATTERNS,
-        ),
-        # debug=True
-    )
-    sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
-    opt_state = optimizer.init(params, subkeys, data)
-
-    if not cfg.optim.sr.time_dep:
-      opt_state = opt_state_ckpt or opt_state  # avoid overwriting ckpted state
-
-  elif cfg.optim.optimizer == 'minsr':
-
-    if cfg.optim.sr.time_dep:
-      iterations_per_timestep = cfg.optim.sr.iterations_per_timestep
-      
-      optimizer = optax.chain(
-        store_last_gradient(),
-        optax.scale(0.001),
-        optax.scale(-1.),)
-          
-      flat_params, unravel_fn = jax.flatten_util.ravel_pytree(params)
-      print(flat_params.shape)
-      n_params = flat_params.shape[0]
-      print(n_params)
-      theta_dot = jnp.zeros((iterations_per_timestep, n_params))  
-
+  
+  
+  use_complex = cfg.network.get('complex', False)
+  log_network_for_loss = None
+  # Exclusively when computing the gradient wrt the energy for complex
+  # wavefunctions, it is necessary to have log(psi) rather than log(|psi|).
+  # This is unused if the wavefunction is real-valued.
+  if cfg.system.get('states', 0):
+    if cfg.optim.objective == 'vmc_overlap':
+      # In the case of a penalty method, we actually need all outputs
+      # to compute the gradient
+      log_network_for_loss = networks.make_state_matrix(signed_network,
+                                                        cfg.system.states)
+      def log_network(*args, **kwargs):
+        phase, mag = log_network_for_loss(*args, **kwargs)
+        return mag + 1.j * phase
     else:
-      optimizer = optax.chain(
-        store_last_gradient(),
-        optax.scale_by_schedule(learning_rate_schedule),
-        optax.scale(-1.),)
+      def log_network(*args, **kwargs):
+        if not use_complex:
+          raise ValueError('This function should never be used if the '
+                           'wavefunction is real-valued.')
+        meta_net = networks.make_total_ansatz(signed_network,
+                                              cfg.system.get('states', 0),
+                                              complex_output=True)
+        phase, mag = meta_net(*args, **kwargs)
+        return mag + 1.j * phase
+  else:
+    def log_network(*args, **kwargs):
+      if not use_complex:
+        raise ValueError('This function should never be used if the '
+                         'wavefunction is real-valued.')
+      phase, mag = signed_network(*args, **kwargs)
+      return mag + 1.j * phase
     
-    """TODO: Add once I've implemented Optax into the optimizer class for SR
-    opt_state = MinSR(
-        ntk=cfg.optim.sr.ntk,
-        damping=cfg.optim.sr.damping,
-        centre_gradients=cfg.optim.sr.centre_gradients,
-        ntk_solver=cfg.optim.sr.ntk_solver,
-        preconditioning=cfg.optim.sr.preconditioning,
-        preset_guess=cfg.optim.sr.preset_guess
+
+  if cfg.system.pyscf_mol:
+    cfg.system.pyscf_mol.build()
+    core_electrons = {
+        atom: ecp_table[0]
+        for atom, ecp_table in cfg.system.pyscf_mol._ecp.items()  # pylint: disable=protected-access
+    }
+    ecp = cfg.system.pyscf_mol.ecp
+  else:
+    ecp = {}
+    core_electrons = {}
+
+  ## Handle checkpointing
+
+  ckpt_save_path = checkpoint.create_save_path(cfg.log.save_path)
+  ckpt_restore_path = checkpoint.get_restore_path(cfg.log.restore_path)
+
+  ckpt_restore_filename = (
+      checkpoint.find_last_checkpoint(ckpt_save_path) or
+      checkpoint.find_last_checkpoint(ckpt_restore_path))
+
+  if ckpt_restore_filename and cfg.log.restore_from_checkpoint:
+    (t_init,
+     data,
+     params,
+     opt_state_ckpt,
+     mcmc_width_ckpt,
+     density_state_ckpt) = checkpoint.restore(
+         ckpt_restore_filename, host_batch_size)
+    spins = data.spins
+  else:
+    logging.info('No checkpoint found. Training new model.')
+    key, subkey = jax.random.split(key)
+    # make sure data on each host is initialized differently
+    subkey = jax.random.fold_in(subkey, jax.process_index())
+    # create electron state (position and spin)
+    pos, spins = init_electrons(
+        subkey,
+        cfg.system.molecule,
+        cfg.system.electrons,
+        batch_size=total_host_batch_size,
+        init_width=cfg.mcmc.init_width,
+        core_electrons=core_electrons,
     )
-    """
-  else:
-    raise ValueError(f'Not a recognized optimizer: {cfg.optim.optimizer}')
 
-  if not optimizer:
-    opt_state = None
-    step = make_training_step(
-        mcmc_step=mcmc_step,
-        optimizer_step=make_loss_step(evaluate_loss))
-  elif isinstance(optimizer, optax.GradientTransformation):
-    # optax/optax-compatible optimizer (ADAM, LAMB, ...)
-    opt_state = jax.pmap(optimizer.init)(params)
+    # For excited states, each device has a batch of walkers, where each walker
+    # is nstates * nelectrons. The vmap over nstates is handled in the function
+    # created in make_total_ansatz
+    pos = jnp.reshape(pos, data_shape + (-1,))
+    pos = kfac_jax.utils.broadcast_all_local_devices(pos)
+    spins = jnp.reshape(spins, data_shape + (-1,))
+    spins = kfac_jax.utils.broadcast_all_local_devices(spins)
+    data = networks.FermiNetData(
+        positions=pos, spins=spins, atoms=batch_atoms, charges=batch_charges
+    )
 
-    if not cfg.optim.sr.time_dep:  # Be careful with this game!
-      opt_state = opt_state_ckpt or opt_state  # avoid overwriting ckpted state
+    t_init = 0
+    opt_state_ckpt = None
+    mcmc_width_ckpt = None
+    density_state_ckpt = None
 
-    if cfg.optim.optimizer == 'minsr':  # For now while I'm using optax
-      step = make_minsr_training_step(
-        mcmc_step=mcmc_step,
-        optimizer_step=make_minsr_opt_update_step(
-          evaluate_loss, optimizer, batch_network,
-          damping=cfg.optim.sr.damping,
-          iterations_per_timestep=cfg.optim.sr.iterations_per_timestep),
-        reset_if_nan=cfg.optim.reset_if_nan,
-        logabs_network=logabs_network)
-    else:
-      step = make_training_step(
-          mcmc_step=mcmc_step,
-          optimizer_step=make_opt_update_step(evaluate_loss, optimizer),
-          reset_if_nan=cfg.optim.reset_if_nan)
-  elif isinstance(optimizer, kfac_jax.Optimizer):
-    step = make_kfac_training_step(
-        mcmc_step=mcmc_step,
-        damping=cfg.optim.kfac.damping,
-        optimizer=optimizer,
-        reset_if_nan=cfg.optim.reset_if_nan)
-    
-  elif cfg.optim.optimizer == 'minsr':
-    step = make_minsr_training_step(
-        mcmc_step=mcmc_step,
-        optimizer_step=make_minsr_opt_update_step(
-          evaluate_loss, optimizer, batch_network),
-        reset_if_nan=cfg.optim.reset_if_nan,
-        logabs_network=logabs_network)
-  else:
-    raise ValueError(f'Unknown optimizer: {optimizer}')
+  
+
+  if cfg.system.states:
+    energy_matrix_file = open(
+        os.path.join(ckpt_save_path, 'energy_matrix.npy'), 'ab')
+
+  observable_fns, observable_states, density_update, s2_matrix_file, dipole_matrix_file, density_matrix_file, train_schema = get_observable_functions(
+    cfg, data, signed_network, ckpt_save_path, density_state_ckpt)
+  logging.info("Defined Observables")
+
+  sharded_key = kfac_jax.utils.make_different_rng_key_on_all_devices(key)
+  params, data = conduct_pretraining_hf(
+    cfg, t_init, spins, network, params, data,
+    batch_network, device_batch_size, sharded_key)
+  logging.info("Conducted pretraining")
+
+  atoms_to_mcmc = atoms if cfg.mcmc.scale_by_nuclear_distance else None
+  mcmc_step = mcmc.make_mcmc_step(
+      batch_network,
+      device_batch_size,
+      steps=cfg.mcmc.steps,
+      atoms=atoms_to_mcmc,
+      blocks=cfg.mcmc.blocks * num_states,
+  )
+  logging.info("Made MCMC step")
+
+  local_energy = make_local_energy_functions(
+    cfg, signed_network, charges)
+  logging.info("Local energy function created")
+
+  
+  evaluate_loss, overlap_function = get_loss_function(
+    cfg, log_network, logabs_network, local_energy, log_network_for_loss)
+  logging.info("Loss function created")
+
+  optimizer, theta_dot, opt_state = optimizer_setup(
+    cfg, params, data, opt_state_ckpt, evaluate_loss, sharded_key)
+  logging.info("Optimizer setup")
+
+  step, opt_state = get_training_step_function(cfg, optimizer, mcmc_step, evaluate_loss, params, opt_state_ckpt, batch_network, opt_state)
+  logging.info("Training step created")
+
 
   if mcmc_width_ckpt is not None:
     mcmc_width = kfac_jax.utils.replicate_all_local_devices(mcmc_width_ckpt[0])
@@ -1186,19 +1113,14 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
   time_of_last_ckpt = time.time()
   weighted_stats = None
 
+  # Handle inference run
   if cfg.optim.optimizer == 'none' and opt_state_ckpt is not None:
-    # If opt_state_ckpt is None, then we're restarting from a previous inference
-    # run (most likely due to preemption) and so should continue from the last
-    # iteration in the checkpoint. Otherwise, starting an inference run from a
-    # training run.
+    
     logging.info('No optimizer provided. Assuming inference run.')
     logging.info('Setting initial iteration to 0.')
     t_init = 0
 
-    # Excited states inference only: rescale each state to be roughly
-    # comparable, to avoid large outlier values in the local energy matrix.
-    # This is not a factor in training, as the outliers are only off-diagonal.
-    # This only becomes a significant factor for systems with >25 electrons.
+    # Excited states inference only
     if cfg.system.states > 0 and 'state_scale' not in params:
       state_matrix = utils.select_output(
           networks.make_state_matrix(signed_network,
@@ -1223,46 +1145,17 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
         log=False)
 
   batch_network_pmapped = constants.pmap(batch_network)
-  #return evaluate_loss, mcmc_step, sharded_key, data, params, mcmc_width, logabs_network
+
+  if cfg.debug_options.notebook:  # For testing applications via jupyter
+    return evaluate_loss, mcmc_step, sharded_key, data, params, mcmc_width, logabs_network
+
   with writer_manager as writer:
+
     # Main training loop
     num_resets = 0  # used if reset_if_nan is true
     for t in range(t_init, cfg.optim.iterations):
       sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
-
-      if cfg.optim.optimizer == 'minsr' and cfg.optim.sr.time_dep:
-        
-        rk_time = (t - t_init) // cfg.optim.sr.iterations_per_timestep
-        time_state_dict = {
-          "time": t - t_init,
-          "rk_time": rk_time
-          }
-        print("I enter here")
-        print(time_state_dict)
-        print(theta_dot.shape)
-
-        data, params, opt_state, loss, aux_data, pmove, theta_dot = step(
-            data,
-            params,
-            opt_state,
-            time_state_dict,
-            theta_dot,
-            subkeys,
-            mcmc_width
-        )
-        
-        print(theta_dot.shape)
-        print(time_state_dict)
-        
-        #if rk_time == 0:
-        theta_dot = theta_dot[0]  # pmean dimension
-        mean_parameter_velocities = jnp.mean(theta_dot, axis=0)
-        var_parameter_velocities = (theta_dot - mean_parameter_velocities)**2
-        print(mean_parameter_velocities[:10])
-        print(var_parameter_velocities[:10])
-        print(jnp.mean(var_parameter_velocities))
-      else:
-        data, params, opt_state, loss, aux_data, pmove = step(
+      data, params, opt_state, loss, aux_data, pmove = step(
             data,
             params,
             opt_state,
@@ -1311,7 +1204,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
       # Logging
       if t % cfg.log.stats_frequency == 0:
         logging_str = ('Step %05d: '
-                       '%03.4f E_h, exp. variance=%03.4f E_h^2, pmove=%0.2f')
+                      '%03.4f E_h, exp. variance=%03.4f E_h^2, pmove=%0.2f')
         logging_args = t, loss, weighted_stats.variance, pmove
 
         writer_kwargs = {
@@ -1339,7 +1232,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=
         writer.write(t, **writer_kwargs)
 
         
-        if wandb_monitoring:
+        if cfg.log.wandb:
           # wandb logging
           metrics = {
                   "mean_energy": loss,

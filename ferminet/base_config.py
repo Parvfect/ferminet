@@ -333,7 +333,19 @@ def default() -> ml_collections.ConfigDict:
           # excitations.
           'excitation_type': 'ordered',
       },
-  })
+      'td':{
+        'time_evolution': False,
+        'damping': 1e-2,
+        'iterations_per_timestep': 10,
+        'dt': 1e-3
+      },
+      'debug_mode': False,
+      'debug_options': {
+        'notebook' : False
+      },
+
+    }
+  )
 
   return cfg
 
