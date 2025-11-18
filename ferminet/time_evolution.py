@@ -69,7 +69,7 @@ def make_td_opt_update_step(
     
     x0 = grad_vector  # Using loss grads as guess        
     theta_dot = jax.scipy.sparse.linalg.cg(
-      fisher_matmul, grad_vector, x0=x0, maxiter=2000)[0]
+      fisher_matmul, grad_vector, x0=x0, maxiter=20000)[0]
           
     return theta_dot
   return accumulate_samples, conduct_timestep
