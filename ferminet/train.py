@@ -709,18 +709,18 @@ def get_training_step_function(
           damping=cfg.optim.sr.damping),
         reset_if_nan=cfg.optim.reset_if_nan)
     
-    elif isinstance(optimizer, kfac_jax.Optimizer):
-      step = make_kfac_training_step(
-          mcmc_step=mcmc_step,
-          damping=cfg.optim.kfac.damping,
-          optimizer=optimizer,
-          reset_if_nan=cfg.optim.reset_if_nan)
-    else:
-      step = make_training_step(
-          mcmc_step=mcmc_step,
-          optimizer_step=make_opt_update_step(evaluate_loss, optimizer),
-          reset_if_nan=cfg.optim.reset_if_nan)
-  
+  elif isinstance(optimizer, kfac_jax.Optimizer):
+    step = make_kfac_training_step(
+        mcmc_step=mcmc_step,
+        damping=cfg.optim.kfac.damping,
+        optimizer=optimizer,
+        reset_if_nan=cfg.optim.reset_if_nan)
+  else:
+    step = make_training_step(
+        mcmc_step=mcmc_step,
+        optimizer_step=make_opt_update_step(evaluate_loss, optimizer),
+        reset_if_nan=cfg.optim.reset_if_nan)
+
   return step, opt_state
   
 
@@ -1149,145 +1149,149 @@ def train(
   if cfg.debug_options.notebook:  # For testing applications via jupyter
     return evaluate_loss, mcmc_step, sharded_key, data, params, mcmc_width, logabs_network
 
-  with writer_manager as writer:
+  flat_params, unravel_fn = jax.flatten_util.ravel_pytree(
+      params)
+  n_params = flat_params.shape[0]
+  logging.info(f"Number of parameters is: {n_params}")
+  #with writer_manager as writer:
 
-    # Main training loop
-    num_resets = 0  # used if reset_if_nan is true
-    for t in range(t_init, cfg.optim.iterations):
+  # Main training loop
+  num_resets = 0  # used if reset_if_nan is true
+  for t in range(t_init, cfg.optim.iterations):
+    sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
+    data, params, opt_state, loss, aux_data, pmove = step(
+          data,
+          params,
+          opt_state,
+          subkeys,
+          mcmc_width)
+
+    # due to pmean, loss, and pmove should be the same across
+    # devices.
+    loss = loss[0]
+    
+    # per batch variance isn't informative. Use weighted mean and variance
+    # instead.
+    weighted_stats = statistics.exponentialy_weighted_stats(
+        alpha=0.1, observation=loss, previous_stats=weighted_stats)
+    pmove = pmove[0]
+
+    # Update observables
+    observable_data = {
+        key: fn(params, data, observable_states[key])
+        for key, fn in observable_fns.items()
+    }
+    if cfg.observables.density:
       sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
-      data, params, opt_state, loss, aux_data, pmove = step(
-            data,
-            params,
-            opt_state,
-            subkeys,
-            mcmc_width)
+      observable_states['density'] = density_update(
+          subkeys, params, data, observable_states['density'])
 
-      # due to pmean, loss, and pmove should be the same across
-      # devices.
-      loss = loss[0]
-      
-      # per batch variance isn't informative. Use weighted mean and variance
-      # instead.
-      weighted_stats = statistics.exponentialy_weighted_stats(
-          alpha=0.1, observation=loss, previous_stats=weighted_stats)
-      pmove = pmove[0]
+    # Update MCMC move width
+    mcmc_width, pmoves = mcmc.update_mcmc_width(
+        t, mcmc_width, cfg.mcmc.adapt_frequency, pmove, pmoves)
 
-      # Update observables
-      observable_data = {
-          key: fn(params, data, observable_states[key])
-          for key, fn in observable_fns.items()
-      }
-      if cfg.observables.density:
-        sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
-        observable_states['density'] = density_update(
-            subkeys, params, data, observable_states['density'])
-
-      # Update MCMC move width
-      mcmc_width, pmoves = mcmc.update_mcmc_width(
-          t, mcmc_width, cfg.mcmc.adapt_frequency, pmove, pmoves)
-
-      if cfg.debug.check_nan:
-        tree = {'params': params, 'loss': loss}
-        if cfg.optim.optimizer != 'none':
-          tree['optim'] = opt_state
-        try:
-          chex.assert_tree_all_finite(tree)
-          num_resets = 0  # Reset counter if check passes
-        except AssertionError as e:
-          if cfg.optim.reset_if_nan:  # Allow a certain number of NaNs
-            num_resets += 1
-            if num_resets > 100:
-              raise e
-          else:
+    if cfg.debug.check_nan:
+      tree = {'params': params, 'loss': loss}
+      if cfg.optim.optimizer != 'none':
+        tree['optim'] = opt_state
+      try:
+        chex.assert_tree_all_finite(tree)
+        num_resets = 0  # Reset counter if check passes
+      except AssertionError as e:
+        if cfg.optim.reset_if_nan:  # Allow a certain number of NaNs
+          num_resets += 1
+          if num_resets > 100:
             raise e
-          
-      # Logging
-      if t % cfg.log.stats_frequency == 0:
-        logging_str = ('Step %05d: '
-                      '%03.4f E_h, exp. variance=%03.4f E_h^2, pmove=%0.2f')
-        logging_args = t, loss, weighted_stats.variance, pmove
-
-        writer_kwargs = {
-            'step': t,
-            'energy': np.asarray(loss),
-            'ewmean': np.asarray(weighted_stats.mean),
-            'ewvar': np.asarray(weighted_stats.variance),
-            'pmove': np.asarray(pmove),
-        }
-        for key in observable_data:
-          obs_data = observable_data[key]
-          if cfg.system.states:
-            obs_data = np.trace(obs_data, axis1=-1, axis2=-2)
-          if key == 'dipole':
-            writer_kwargs['mu_x'] = obs_data[0]
-            writer_kwargs['mu_y'] = obs_data[1]
-            writer_kwargs['mu_z'] = obs_data[2]
-          elif key == 'density':
-            pass
-          elif key == 's2':
-            writer_kwargs[key] = obs_data
-            logging_str += ', <S^2>=%03.4f'
-            logging_args += obs_data,
-        logging.info(logging_str, *logging_args)
-        writer.write(t, **writer_kwargs)
-
+        else:
+          raise e
         
-        if cfg.log.wandb:
-          # wandb logging
-          metrics = {
-                  "mean_energy": loss,
-                  "variance": weighted_stats.variance,
-                  "pmove": pmove
-              }
+    # Logging
+    if t % cfg.log.stats_frequency == 0:
+      logging_str = ('Step %05d: '
+                    '%03.4f E_h, exp. variance=%03.4f E_h^2, pmove=%0.2f')
+      logging_args = t, loss, weighted_stats.variance, pmove
 
-          wandb.log(writer_kwargs)
+      writer_kwargs = {
+          'step': t,
+          'energy': np.asarray(loss),
+          'ewmean': np.asarray(weighted_stats.mean),
+          'ewvar': np.asarray(weighted_stats.variance),
+          'pmove': np.asarray(pmove),
+      }
+      for key in observable_data:
+        obs_data = observable_data[key]
+        if cfg.system.states:
+          obs_data = np.trace(obs_data, axis1=-1, axis2=-2)
+        if key == 'dipole':
+          writer_kwargs['mu_x'] = obs_data[0]
+          writer_kwargs['mu_y'] = obs_data[1]
+          writer_kwargs['mu_z'] = obs_data[2]
+        elif key == 'density':
+          pass
+        elif key == 's2':
+          writer_kwargs[key] = obs_data
+          logging_str += ', <S^2>=%03.4f'
+          logging_args += obs_data,
+      logging.info(logging_str, *logging_args)
+      #writer.write(t, **writer_kwargs)
 
-      if t % cfg.log.log_frequency == 0 and cfg.log.wandb:
-
-        # Visual data
-        batch_network_output = batch_network_pmapped(
-          params, data.positions, data.spins, data.atoms, data.charges)
-        pos = data.positions
-        prob_density = jnp.exp(batch_network_output)
-        img_array = plot_electron_histograms(
-          pos, prob_density)
-        combined_img_array = plot_electron_presence_map(pos)
-
+      
+      if cfg.log.wandb:
         # wandb logging
-        indv_images = wandb.Image(
-          img_array, caption=f"Epoch {t}")
-        combined_img = wandb.Image(
-          combined_img_array, caption=f"Epoch {t}")
         metrics = {
-                "indv_plots": indv_images,
-                "full_plot": combined_img
+                "mean_energy": loss,
+                "variance": weighted_stats.variance,
+                "pmove": pmove
             }
 
-        wandb.log(metrics)
+        wandb.log(writer_kwargs)
 
-      # Log data about observables too big to fit in a CSV
-      if cfg.system.states:
-        energy_matrix = aux_data.local_energy_mat
-        energy_matrix = np.nanmean(np.nanmean(energy_matrix, axis=0), axis=0)
-        np.save(energy_matrix_file, energy_matrix)
-        if cfg.observables.s2:
-          np.save(s2_matrix_file, observable_data['s2'])
-        if cfg.observables.dipole:
-          np.save(dipole_matrix_file, observable_data['dipole'])
-      if cfg.observables.density:
-        np.save(density_matrix_file, observable_data['density'])
+    if t % cfg.log.log_frequency == 0 and cfg.log.wandb:
 
-      # Checkpointing
-      if time.time() - time_of_last_ckpt > cfg.log.save_frequency * 60:
-        checkpoint.save(ckpt_save_path, t, data, params, opt_state, mcmc_width)
-        time_of_last_ckpt = time.time()
+      # Visual data
+      batch_network_output = batch_network_pmapped(
+        params, data.positions, data.spins, data.atoms, data.charges)
+      pos = data.positions
+      prob_density = jnp.exp(batch_network_output)
+      img_array = plot_electron_histograms(
+        pos, prob_density)
+      combined_img_array = plot_electron_presence_map(pos)
 
-    # Shut down logging at end
+      # wandb logging
+      indv_images = wandb.Image(
+        img_array, caption=f"Epoch {t}")
+      combined_img = wandb.Image(
+        combined_img_array, caption=f"Epoch {t}")
+      metrics = {
+              "indv_plots": indv_images,
+              "full_plot": combined_img
+          }
+
+      wandb.log(metrics)
+
+    # Log data about observables too big to fit in a CSV
     if cfg.system.states:
-      energy_matrix_file.close()
+      energy_matrix = aux_data.local_energy_mat
+      energy_matrix = np.nanmean(np.nanmean(energy_matrix, axis=0), axis=0)
+      np.save(energy_matrix_file, energy_matrix)
       if cfg.observables.s2:
-        s2_matrix_file.close()
+        np.save(s2_matrix_file, observable_data['s2'])
       if cfg.observables.dipole:
-        dipole_matrix_file.close()
+        np.save(dipole_matrix_file, observable_data['dipole'])
     if cfg.observables.density:
-      density_matrix_file.close()
+      np.save(density_matrix_file, observable_data['density'])
+
+    # Checkpointing
+    if time.time() - time_of_last_ckpt > cfg.log.save_frequency * 60:
+      checkpoint.save(ckpt_save_path, t, data, params, opt_state, mcmc_width)
+      time_of_last_ckpt = time.time()
+
+  # Shut down logging at end
+  if cfg.system.states:
+    energy_matrix_file.close()
+    if cfg.observables.s2:
+      s2_matrix_file.close()
+    if cfg.observables.dipole:
+      dipole_matrix_file.close()
+  if cfg.observables.density:
+    density_matrix_file.close()

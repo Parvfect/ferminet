@@ -69,7 +69,7 @@ def make_td_opt_update_step(
     
     x0 = grad_vector  # Using loss grads as guess        
     theta_dot = jax.scipy.sparse.linalg.cg(
-      fisher_matmul, grad_vector, x0=x0, maxiter=20000)[0]
+      fisher_matmul, grad_vector, x0=x0, maxiter=10000)[0]
           
     return theta_dot
   return accumulate_samples, conduct_timestep
@@ -146,7 +146,7 @@ def make_time_evolution_step(
       position_arr = lax.dynamic_update_slice(
           position_arr,
           data.positions,
-          (512 * i, 0)   # (row_offset, col_offset)
+          (batch_size * i, 0)   # (row_offset, col_offset)
       )
 
       return position_arr, grad_vector, key
@@ -167,7 +167,7 @@ def make_time_evolution_step(
       position_arr = lax.dynamic_update_slice(
           position_arr,
           data.positions,
-          (512, 0)   # (row_offset, col_offset)
+          (batch_size, 0)   # (row_offset, col_offset)
       )
       
       init_carry = (position_arr, grad_vector, key)
@@ -193,7 +193,7 @@ def make_time_evolution_step(
     if time_integration_method == 'rk2':
       
       logging.info("Starting RK2 first step")
-      theta_dot_1 = 1j * constants.pmean(
+      theta_dot_1 = -1j * constants.pmean(
         rk2_inner_fn(params, key, data))
 
       half_updates, _ = optimizer.update(
@@ -201,7 +201,7 @@ def make_time_evolution_step(
       params_mid = optax.apply_updates(params, half_updates)
 
       logging.info("Starting RK2 second step")
-      theta_dot_2 = 1j * constants.pmean(
+      theta_dot_2 = -1j * constants.pmean(
         rk2_inner_fn(params_mid, key, data))
 
       logging.info("Updating params")
@@ -224,3 +224,147 @@ def make_time_evolution_step(
       loss, aux_data, pmove
 
   return step
+
+
+"""
+def cg_err_estimator(mcmc_step, accumulate_samples, conduct_timestep, iterations_per_timestep, n_electrons):
+    # The same timestep - does 10 CG steps and calculates variance in the update vector and in the loss grads
+    # Then changes the samples accumulated per timestep and does the same again
+    # Then changes the max iterations and does it again
+
+    # We don't actually get the inverse matrice we get the solved vector (N_p), so we have to test on that instead
+    # Check scale of loss grads changing and then that should give us an idea of the scale of the variance of the estimated inverse of the metric
+    
+    # Variance per iteration (200 v 2000 v 20000) - 10 iterations
+    # Mean value for each (1e2, 1e3, 1e4)
+    # Variance for different samples accumulated (5e3, 5e4, 5e5)
+  def step(
+    data: networks.FermiNetData,
+    params: networks.ParamTree,
+    opt_state: Optional[optax.OptState],
+    key: chex.PRNGKey,
+    mcmc_width: jnp.ndarray,
+    time_integration_method = 'rk2'
+  ):
+    
+    A full update iteration with integration: MCMC steps + optimization
+    For a single timestep
+    # MCMC loop
+
+    batch_size = data.positions.shape[0]
+    mcmc_key, loss_key = jax.random.split(key, num=2)
+    flat_params, unravel_fn = jax.flatten_util.ravel_pytree(
+      params)
+    n_params = flat_params.shape[0]
+    spins, atoms, charges = data.spins, data.atoms, data.charges
+
+    def accumulate_samples_inner_fn(i, carry):
+      position_arr, grad_vector, key = carry
+      mcmc_key, loss_key = jax.random.split(key)
+
+      positions = lax.dynamic_slice(
+          position_arr,
+          (i * batch_size, 0),           # start index (row_offset, col_offset)
+          (batch_size, position_arr.shape[1])   # slice shape
+      )
+
+      accumulated_data = networks.FermiNetData(
+          positions=positions,
+          spins=spins,
+          atoms=atoms,
+          charges=charges,
+      )
+
+      data, pmove = mcmc_step(
+        params, accumulated_data, mcmc_key, mcmc_width)
+      
+      _, _, grad_vector = accumulate_samples(
+        params, key, data, grad_vector)
+      
+      position_arr = lax.dynamic_update_slice(
+          position_arr,
+          data.positions,
+          (512 * i, 0)   # (row_offset, col_offset)
+      )
+
+      return position_arr, grad_vector, key
+
+    logging.info(f"Starting sample accumulation for timestep")
+
+    
+    def timestep_variance(i, carry):
+      ## Variance of gradient update at time t with fixed data - consistency of inverse
+      data, grad_vector, theta_dot_arr, key = carry
+      theta_dot = conduct_timestep(
+        params, key, data, grad_vector)
+      
+      theta_dot_arr = lax.dynamic_update(
+        theta_dot_arr,
+        theta_dot,
+        i
+      )
+
+      return data, grad_vector, theta_dot_arr, key
+
+
+    def get_per_timestep_update_variance(params, key, data):
+
+      grad_vector = jnp.zeros(
+        (n_params))
+      position_arr = jnp.zeros(
+        (iterations_per_timestep * batch_size, n_electrons*3)
+      )
+
+      data, pmove = mcmc_step(
+        params, data, mcmc_key, mcmc_width)
+      
+      position_arr = lax.dynamic_update_slice(
+          position_arr,
+          data.positions,
+          (512, 0)   # (row_offset, col_offset)
+      )
+      
+      init_carry = (position_arr, grad_vector, key)
+      position_arr, final_grad_vector, final_key = lax.fori_loop(
+          0, iterations_per_timestep, accumulate_samples_inner_fn, init_carry
+      )
+
+      # Full positions, final grad vector
+      data = networks.FermiNetData(
+          positions=position_arr,
+          spins=jnp.repeat(
+            data.spins, repeats=iterations_per_timestep, axis=0),
+          atoms=jnp.repeat(
+            data.atoms, repeats=iterations_per_timestep, axis=0),
+          charges=jnp.repeat(
+            data.charges, repeats=iterations_per_timestep, axis=0)
+      )
+       
+      per_timestep_variance_iterations = 10
+      # That's for iterations_per_timestep samples
+      theta_dot_arr = jnp.zeros(
+        (per_timestep_variance_iterations, n_params))
+      init_carry = (data, grad_vector, theta_dot_arr, key)
+
+      data, grad_vector, theta_dot_arr, key = lax.fori_loop(0, per_timestep_variance_iterations, timestep_variance, init_carry)
+
+      #theta_dot = conduct_timestep(
+      #  params, key, data, final_grad_vector)
+      
+      return theta_dot_arr
+
+    # Okay so at the top level we need
+    # Per timestep variance for
+    # 1. Differing n_samples (change iterations per timestep) (5e3, 5e4, 5e5)
+    # 2. Differing maxiter of cg (change max_iterations) (2e1, 2e2, 2e3, 2e4)
+    # Let's do it at the same timestep - it should be irrespective of that anyway (think deeply about this)
+
+    # what it returns is theta_dot_mean, theta_dot_variance, loss_mean, loss_variance - so we will have (7 copies of each for n_samples and maxiter comparision)
+
+    # We can make different step functions instead of doing the loop - just change max iter, and then we can put them in a list - and call them individually and sum contributions or something - n_samples, and n_iterations
+    # Can just log the values directly - its at the same timestep so they should be the same or give us some relationship to exploit
+
+    return data, new_params, opt_state, \
+      loss, aux_data, pmove
+  pass
+"""
