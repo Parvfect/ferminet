@@ -1163,13 +1163,23 @@ def train(
   # Main training loop
   num_resets = 0  # used if reset_if_nan is true
   for t in range(t_init, cfg.optim.iterations):
+
     sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
-    data, params, opt_state, loss, aux_data, pmove = step(
-          data,
-          params,
-          opt_state,
-          subkeys,
-          mcmc_width)
+    if cfg.td.time_evolution:
+      data, params, opt_state, loss, aux_data, pmove = step(
+            data,
+            params,
+            opt_state,
+            t - t_init,
+            subkeys,
+            mcmc_width)
+    else:
+      data, params, opt_state, loss, aux_data, pmove = step(
+            data,
+            params,
+            opt_state,
+            subkeys,
+            mcmc_width)
 
     # due to pmean, loss, and pmove should be the same across
     # devices.

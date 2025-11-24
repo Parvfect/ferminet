@@ -22,10 +22,10 @@ def make_td_opt_update_step(
     evaluate_loss, argnums=0, has_aux=True)
   
   def accumulate_samples(
-      params, key, data, grad_vector):
+      params, key, data, time, grad_vector):
     """Accumulates samples for right side of the equation $X\epsilon$"""
 
-    (loss, aux_data), grad = loss_and_grad(params, key, data)
+    (loss, aux_data), grad = loss_and_grad(params, key, data, time)
     flat_grads, unravel_fn = jax.flatten_util.ravel_pytree(grad)
     energies = aux_data.local_energy - loss
     batch_size = energies.shape[0]
@@ -98,11 +98,13 @@ def make_time_evolution_step(
   #TODO: Manage the pmapping here and the arguments that should
   ##     be passed.
   @functools.partial(constants.pmap,
-                    donate_argnums=(0, 1, 2))
+                      in_axes=(0, 0, 0, None, 0, 0),
+                      donate_argnums=(0, 1, 2))
   def step(
     data: networks.FermiNetData,
     params: networks.ParamTree,
     opt_state: Optional[optax.OptState],
+    time: float,
     key: chex.PRNGKey,
     mcmc_width: jnp.ndarray,
     time_integration_method = 'rk2'
@@ -143,7 +145,7 @@ def make_time_evolution_step(
         params, accumulated_data, mcmc_key, mcmc_width)
       
       _, _, grad_vector = accumulate_samples(
-        params, key, data, grad_vector)
+        params, key, data, time, grad_vector)
       
       position_arr = lax.dynamic_update_slice(
           position_arr,
@@ -216,7 +218,7 @@ def make_time_evolution_step(
       #TODO: The last energy move is to be figured out - is it at that timestep?
       data, pmove = mcmc_step(
         new_params, data, mcmc_key, mcmc_width)
-      loss, aux_data, _ = accumulate_samples(params, key, data, jnp.zeros((n_params)))
+      loss, aux_data, _ = accumulate_samples(params, key, data, time, jnp.zeros((n_params)))
 
     else:
       raise NotImplementedError(
