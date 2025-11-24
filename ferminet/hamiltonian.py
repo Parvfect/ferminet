@@ -269,7 +269,7 @@ def potential_electric_field(pos: Array, t: int):
   E_max = 0.6
   w = 0.03
 
-  t = t * 0.1 # Doing dt - quite abrupt, but let's see
+  t = t # Doing dt - quite abrupt, but let's see
 
   T = 2 * 3.14 / w # period
 
