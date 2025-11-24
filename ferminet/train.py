@@ -687,10 +687,15 @@ def get_training_step_function(
       accumulate_samples, conduct_timestep = make_td_opt_update_step(
         evaluate_loss, batch_network, cfg.td.damping, cfg.td.iterations_per_timestep
       )
+
+      n_electrons = sum(int(round(atom.charge)) for atom in cfg.system.molecule)
+      cg_iterations = cfg.td.cg_iterations
       step = make_time_evolution_step(
         mcmc_step=mcmc_step, optimizer=optimizer,
         accumulate_samples=accumulate_samples, conduct_timestep=conduct_timestep,
-        iterations_per_timestep=cfg.td.iterations_per_timestep
+        iterations_per_timestep=cfg.td.iterations_per_timestep,
+        n_electrons=n_electrons,
+        cg_iterations=cg_iterations
       )
 
       

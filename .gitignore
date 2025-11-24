@@ -2,3 +2,7 @@
 *.egg-info
 *.csv
 *.npz
+env**
+*.npy
+*.pdf
+**/wandb

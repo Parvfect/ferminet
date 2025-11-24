@@ -33,7 +33,7 @@ def make_td_opt_update_step(
     return loss, aux_data, grad_vector + flat_grads / iterations_per_timestep
   
   def conduct_timestep(
-      params, key, data, grad_vector):
+      params, key, data, grad_vector, cg_iterations):
     """
     Solves for $XX^T \theta_dot = X\epsilon$
     $X\epsilon$ is accumulated in the grad_vector
@@ -69,7 +69,8 @@ def make_td_opt_update_step(
     
     x0 = grad_vector  # Using loss grads as guess        
     theta_dot = jax.scipy.sparse.linalg.cg(
-      fisher_matmul, grad_vector, x0=x0, maxiter=10000)[0]
+      fisher_matmul, grad_vector, x0=x0,
+      maxiter=cg_iterations)[0]
           
     return theta_dot
   return accumulate_samples, conduct_timestep
@@ -82,8 +83,9 @@ def make_time_evolution_step(
     accumulate_samples,
     conduct_timestep,
     iterations_per_timestep,
+    n_electrons,
+    cg_iterations,
     reset_if_nan: bool = False,
-    n_electrons=2
 ):
   """Makes time evolution step from Carleo's paper (Nys 2024) by fitting the 
   parameter update to time evolution of the state. For each dt, accumulates 
@@ -186,7 +188,7 @@ def make_time_evolution_step(
       )
 
       theta_dot = conduct_timestep(
-        params, key, data, final_grad_vector)
+        params, key, data, final_grad_vector, cg_iterations)
       
       return theta_dot
 

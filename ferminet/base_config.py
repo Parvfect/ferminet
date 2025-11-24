@@ -337,7 +337,8 @@ def default() -> ml_collections.ConfigDict:
         'time_evolution': False,
         'damping': 1e-6,
         'iterations_per_timestep': 10,
-        'dt': 1e-3
+        'dt': 1e-3,
+        'cg_iterations': 2000,
       },
       'debug_mode': False,
       'debug_options': {
