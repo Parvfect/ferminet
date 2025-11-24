@@ -283,7 +283,7 @@ def potential_electric_field(pos: Array, t: int):
     )
   )
 
-  w2 = 1.0
+  w2 = 0.0
 
   # Add the dot product here, testing if that is at fault
   return - sum([
