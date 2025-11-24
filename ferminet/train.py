@@ -1219,7 +1219,7 @@ def train(
         
         #logging.info(f"{jnp.mean(theta_dot), jnp.max(theta_dot), jnp.min#(theta_dot), jnp.mean((theta_dot - jnp.mean(theta_dot) / n_params)**2)}")
         if t - t_init < 10:
-          logging.info(f"{r2}")
+          logging.info(f"{jnp.mean(r2)}")
     else:
       data, params, opt_state, loss, aux_data, pmove = step(
             data,
