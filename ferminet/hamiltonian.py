@@ -266,10 +266,10 @@ def excited_kinetic_energy_matrix(
 def potential_electric_field(pos: Array, t: int):
   E_vec = jnp.array([0.0, 0.0, 1.0]) # Unit vector along z direction
   
-  E_max = 6.0
-  w = 1
+  E_max = 0.6
+  w = 0.03
 
-  t = t * 0.01 # Doing dt - quite abrupt, but let's see
+  t = t * 0.1 # Doing dt - quite abrupt, but let's see
 
   T = 2 * 3.14 / w # period
 
@@ -282,6 +282,8 @@ def potential_electric_field(pos: Array, t: int):
       )
     )
   )
+
+  w2 = 1.0
 
   # Add the dot product here, testing if that is at fault
   return - sum([
