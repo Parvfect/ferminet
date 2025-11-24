@@ -19,6 +19,8 @@ import importlib
 import os
 import time
 from typing import Optional, Mapping, Sequence, Tuple, Union
+import pickle
+import json
 
 from absl import logging
 import chex
@@ -39,7 +41,8 @@ from ferminet.utils import utils
 from ferminet.utils import writers
 from ferminet.stochastic_reconfiguration import \
   make_sr_opt_update_step, make_sr_training_step
-from ferminet.time_evolution import make_td_opt_update_step, make_time_evolution_step
+from ferminet.time_evolution import \
+    make_td_opt_update_step, make_time_evolution_step, cg_err_estimator
 from ferminet.training_monitoring import wandb_login, start_wandb_run
 from ferminet.visual_tools import \
   plot_electron_histograms, plot_combined_electron_positions, plot_electron_presence_map
@@ -685,7 +688,7 @@ def get_training_step_function(
 
     if cfg.td.time_evolution:
       accumulate_samples, conduct_timestep = make_td_opt_update_step(
-        evaluate_loss, batch_network, cfg.td.damping, cfg.td.iterations_per_timestep
+        evaluate_loss=evaluate_loss, batch_network=batch_network, damping=cfg.td.damping, iterations_per_timestep=cfg.td.iterations_per_timestep
       )
 
       n_electrons = sum(int(round(atom.charge)) for atom in cfg.system.molecule)
@@ -698,10 +701,21 @@ def get_training_step_function(
         cg_iterations=cg_iterations
       )
 
+      if cfg.td.estimate_error:
+        err_step = cg_err_estimator(
+        mcmc_step=mcmc_step, optimizer=optimizer,
+        accumulate_samples=accumulate_samples, conduct_timestep=conduct_timestep,
+        iterations_per_timestep=cfg.td.iterations_per_timestep,
+        n_electrons=n_electrons,
+        cg_iterations=cg_iterations
+        )
+        step = err_step   # Needs to work in conjunction later, fine for testing
+
+
       
-    elif cfg.optim.optimizer == 'sr':  # For now while I'm using optax
+    elif cfg.optim.optimizer == 'sr' and not cfg.td.time_evolution:  # For now while I'm using optax
       
-      if not cfg.td.time_evolution or cfg.optim.optimzer == 'sr':  # Be careful with this game!
+      if not cfg.td.time_evolution:  # Be careful with this game!
         opt_state = opt_state_ckpt or opt_state  # avoid overwriting ckpted state
 
       if opt_state_ckpt is not None and not cfg.td.time_evolution:  # Tricky for td
@@ -1166,13 +1180,46 @@ def train(
 
     sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
     if cfg.td.time_evolution:
-      data, params, opt_state, loss, aux_data, pmove = step(
-            data,
-            params,
-            opt_state,
-            t - t_init,
-            subkeys,
-            mcmc_width)
+
+      if cfg.td.estimate_error:
+          theta_dot_mean_per_iteration, theta_dot_var_per_iteration, \
+            theta_dot_arr_w_samples, theta_dot_arr_w_cg_iterations = step(
+              data,
+              params,
+              opt_state,
+              (t - t_init) + 100,  # Projecting to a forward time
+              subkeys,
+              mcmc_width
+            )
+          logging.info(jnp.mean(theta_dot_var_per_iteration))
+          logging.info(jnp.mean(theta_dot_mean_per_iteration))
+          tvmc_dict = {
+            'per_iteration_mean': theta_dot_mean_per_iteration,
+            'per_iterations_variance': theta_dot_var_per_iteration,
+            'w_samples': theta_dot_arr_w_samples,
+            'w_cg_iterations': theta_dot_arr_w_cg_iterations
+          }
+
+          dict_savepath_pickle = os.path.join(
+            ckpt_save_path, 'tvmc_dict.pkl')
+          dict_savepath_json = os.path.join(
+            ckpt_save_path, 'tvmc_dict.json')
+          with open(
+            dict_savepath_pickle, 'wb') as f:
+            pickle.dump(tvmc_dict, f)
+
+      else:
+        data, params, opt_state, loss, aux_data, pmove, theta_dot, r2 = step(
+              data,
+              params,
+              opt_state,
+              t - t_init,
+              subkeys,
+              mcmc_width)
+        
+        #logging.info(f"{jnp.mean(theta_dot), jnp.max(theta_dot), jnp.min#(theta_dot), jnp.mean((theta_dot - jnp.mean(theta_dot) / n_params)**2)}")
+        if t - t_init < 10:
+          logging.info(f"{r2}")
     else:
       data, params, opt_state, loss, aux_data, pmove = step(
             data,
@@ -1297,7 +1344,8 @@ def train(
       np.save(density_matrix_file, observable_data['density'])
 
     # Checkpointing
-    if time.time() - time_of_last_ckpt > cfg.log.save_frequency * 60:
+    if time.time() - time_of_last_ckpt > cfg.log.save_frequency * 60 \
+        and not cfg.td.time_evolution:
       checkpoint.save(ckpt_save_path, t, data, params, opt_state, mcmc_width)
       time_of_last_ckpt = time.time()
 

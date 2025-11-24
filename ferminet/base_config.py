@@ -339,6 +339,7 @@ def default() -> ml_collections.ConfigDict:
         'iterations_per_timestep': 10,
         'dt': 1e-3,
         'cg_iterations': 2000,
+        'estimate_error': False
       },
       'debug_mode': False,
       'debug_options': {
