@@ -202,7 +202,7 @@ def make_time_evolution_step(
     if time_integration_method == 'rk2':
       
       logging.info("Starting RK2 first step")
-      theta_dot_1, _, grad_vector_1, data, pmove = constants.pmean(
+      theta_dot_1, _, grad_vector_1, _, pmove = constants.pmean(
         rk2_inner_fn(params, key, data, time))
       theta_dot_1 = -1j * theta_dot_1
       #theta_dot_1 = -1j * grad_vector_1
