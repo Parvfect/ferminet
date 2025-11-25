@@ -121,9 +121,7 @@ def make_time_evolution_step(
     flat_params, unravel_fn = jax.flatten_util.ravel_pytree(
       params)
     n_params = flat_params.shape[0]
-    print(data.spins.shape)
-    print(batch_size)
-
+    
     spins, atoms, charges = data.spins, data.atoms, data.charges
 
     def accumulate_samples_inner_fn(i, carry):
@@ -197,7 +195,7 @@ def make_time_evolution_step(
         params, key, data, final_grad_vector,
         cg_iterations, batch_size)
       
-      return theta_dot, r2, final_grad_vector, data, pmove
+      return theta_dot, r2, final_grad_vector, position_arr, pmove
 
     if time_integration_method == 'rk2':
       
@@ -212,7 +210,7 @@ def make_time_evolution_step(
       params_mid = optax.apply_updates(params, half_updates)
 
       logging.info("Starting RK2 second step")
-      theta_dot_2, r2, grad_vector_2, data, pmove = constants.pmean(
+      theta_dot_2, r2, grad_vector_2, _, pmove = constants.pmean(
         rk2_inner_fn(params_mid, key, data, time))
       theta_dot_2 = -1j * theta_dot_2
       #theta_dot_2 = -1j * grad_vector_2

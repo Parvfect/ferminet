@@ -1172,10 +1172,16 @@ def train(
       params)
   n_params = flat_params.shape[0]
   logging.info(f"Number of parameters is: {n_params}")
-  #with writer_manager as writer:
 
+
+  #with writer_manager as writer:
+  #return evaluate_loss, mcmc_step, sharded_key, data, params, mcmc_width, logabs_network, batch_network
   # Main training loop
   num_resets = 0  # used if reset_if_nan is true
+  rk = 0
+  burn_in_step = make_training_step(
+        mcmc_step=mcmc_step, optimizer_step=null_update)
+
   for t in range(t_init, cfg.optim.iterations):
 
     sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
@@ -1220,6 +1226,24 @@ def train(
         #logging.info(f"{jnp.mean(theta_dot), jnp.max(theta_dot), jnp.min#(theta_dot), jnp.mean((theta_dot - jnp.mean(theta_dot) / n_params)**2)}")
         if r2 is not None:
           logging.info(f"{jnp.mean(r2)}")
+          rk += jnp.mean(r2)
+
+        for t in range(10):
+          data, params, *_ = burn_in_step(
+            data,
+            params,
+            state=None,
+            key=subkeys,
+            mcmc_width=mcmc_width)
+          #print(data.positions.shape)
+          #print(data.spins.shape)
+          #print(data.atoms.shape)
+          #print(data.charges.shape)
+          #print(data.positions)
+          #print(data.spins)
+          #print(data.atoms)
+          #print(data.charges)
+          #print(t)
     else:
       data, params, opt_state, loss, aux_data, pmove = step(
             data,
@@ -1280,6 +1304,10 @@ def train(
           'ewvar': np.asarray(weighted_stats.variance),
           'pmove': np.asarray(pmove),
       }
+
+      if cfg.td.time_evolution:
+        writer_kwargs['rk'] = rk
+
       for key in observable_data:
         obs_data = observable_data[key]
         if cfg.system.states:
