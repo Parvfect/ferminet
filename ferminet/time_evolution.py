@@ -191,27 +191,31 @@ def make_time_evolution_step(
             data.charges, repeats=iterations_per_timestep, axis=0)
       )
 
+      theta_dot, r2 = None, None
+      
       theta_dot, r2 = conduct_timestep(
         params, key, data, final_grad_vector,
         cg_iterations, batch_size)
       
-      return theta_dot, r2
+      return theta_dot, r2, final_grad_vector, data, pmove
 
     if time_integration_method == 'rk2':
       
       logging.info("Starting RK2 first step")
-      theta_dot_1, _ = constants.pmean(
+      theta_dot_1, _, grad_vector_1, data, pmove = constants.pmean(
         rk2_inner_fn(params, key, data, time))
       theta_dot_1 = -1j * theta_dot_1
+      #theta_dot_1 = -1j * grad_vector_1
 
       half_updates, _ = optimizer.update(
         unravel_fn(theta_dot_1 * 0.5), opt_state, params)
       params_mid = optax.apply_updates(params, half_updates)
 
       logging.info("Starting RK2 second step")
-      theta_dot_2, r2 = constants.pmean(
+      theta_dot_2, r2, grad_vector_2, data, pmove = constants.pmean(
         rk2_inner_fn(params_mid, key, data, time))
       theta_dot_2 = -1j * theta_dot_2
+      #theta_dot_2 = -1j * grad_vector_2
 
       logging.info("Updating params")
       # Step 4: Full step update with k2
@@ -220,10 +224,8 @@ def make_time_evolution_step(
       new_params = optax.apply_updates(params, updates)
 
       logging.info("Evaluating final energy")
-      data, pmove = mcmc_step(
-        new_params, data, mcmc_key, mcmc_width)
       loss, aux_data, _ = accumulate_samples(
-        params, key, data, time, jnp.zeros((n_params)))
+        new_params, key, data, time, jnp.zeros((n_params)))
 
     else:
       raise NotImplementedError(
