@@ -266,8 +266,8 @@ def excited_kinetic_energy_matrix(
 def potential_electric_field(pos: Array, t: int):
   E_vec = jnp.array([0.0, 0.0, 1.0]) # Unit vector along z direction
   
-  E_max = 1.2
-  w = 0.03
+  E_max = 0.6
+  w = 6
 
   t = 0.1 * t # Doing dt - quite abrupt, but let's see
 
