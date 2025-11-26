@@ -6,3 +6,5 @@ env**
 *.npy
 *.pdf
 **/wandb
+lithium_ground_state
+*.ipynb

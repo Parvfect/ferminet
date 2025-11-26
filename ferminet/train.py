@@ -1193,7 +1193,7 @@ def train(
               data,
               params,
               opt_state,
-              (t - t_init) + 100,  # Projecting to a forward time
+              (t - t_init),  # Projecting to a forward time
               subkeys,
               mcmc_width
             )
@@ -1215,7 +1215,7 @@ def train(
             pickle.dump(tvmc_dict, f)
 
       else:
-        data, params, opt_state, loss, aux_data, pmove, theta_dot, r2 = step(
+        data, params, opt_state, loss, aux_data, pmove, theta_dot, r2, eigs = step(
               data,
               params,
               opt_state,
@@ -1223,27 +1223,19 @@ def train(
               subkeys,
               mcmc_width)
         
+        print(eigs)
         #logging.info(f"{jnp.mean(theta_dot), jnp.max(theta_dot), jnp.min#(theta_dot), jnp.mean((theta_dot - jnp.mean(theta_dot) / n_params)**2)}")
         if r2 is not None:
           logging.info(f"{jnp.mean(r2)}")
           rk += jnp.mean(r2)
 
-        for t in range(10):
+        for l in range(5):
           data, params, *_ = burn_in_step(
             data,
             params,
             state=None,
             key=subkeys,
             mcmc_width=mcmc_width)
-          #print(data.positions.shape)
-          #print(data.spins.shape)
-          #print(data.atoms.shape)
-          #print(data.charges.shape)
-          #print(data.positions)
-          #print(data.spins)
-          #print(data.atoms)
-          #print(data.charges)
-          #print(t)
     else:
       data, params, opt_state, loss, aux_data, pmove = step(
             data,
@@ -1298,7 +1290,7 @@ def train(
       logging_args = t, loss, weighted_stats.variance, pmove
 
       writer_kwargs = {
-          'step': t,
+          'step': (t - t_init),
           'energy': np.asarray(loss),
           'ewmean': np.asarray(weighted_stats.mean),
           'ewvar': np.asarray(weighted_stats.variance),

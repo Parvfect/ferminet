@@ -265,7 +265,7 @@ def make_dipole(
     else:
       # the dipole moment is trivial in this case - it's just the expected
       # position of an electron, or the center of mass of the electron density
-      moment = jnp.sum(jnp.reshape(data.positions, (-1, 3)), axis=0)
+      moment = -jnp.sum(jnp.reshape(data.positions, (-1, 3)), axis=0)
 
     return moment
 
