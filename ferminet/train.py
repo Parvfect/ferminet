@@ -42,7 +42,7 @@ from ferminet.utils import writers
 from ferminet.stochastic_reconfiguration import \
   make_sr_opt_update_step, make_sr_training_step
 from ferminet.time_evolution import \
-    make_td_opt_update_step, make_time_evolution_step, cg_err_estimator
+    make_td_opt_update_step, make_time_evolution_step, cg_err_estimator, make_td_opt_update_step_full_solve, make_time_evolution_step_low_sample_limit
 from ferminet.training_monitoring import wandb_login, start_wandb_run
 from ferminet.visual_tools import \
   plot_electron_histograms, plot_combined_electron_positions, plot_electron_presence_map
@@ -687,18 +687,30 @@ def get_training_step_function(
 
 
     if cfg.td.time_evolution:
-      accumulate_samples, conduct_timestep = make_td_opt_update_step(
-        evaluate_loss=evaluate_loss, batch_network=batch_network, damping=cfg.td.damping, iterations_per_timestep=cfg.td.iterations_per_timestep
-      )
-
       n_electrons = sum(int(round(atom.charge)) for atom in cfg.system.molecule)
-      cg_iterations = cfg.td.cg_iterations
-      step = make_time_evolution_step(
+
+      if cfg.td.full_solve:
+        accumulate_samples, conduct_timestep = make_td_opt_update_step_full_solve(
+          evaluate_loss, batch_network, cfg.td.iterations_per_timestep, cfg.td.ac, cfg.td.rc
+        )
+        step = make_time_evolution_step_low_sample_limit(
+        mcmc_step=mcmc_step, optimizer=optimizer,
+        accumulate_samples=accumulate_samples, conduct_timestep=conduct_timestep,
+        iterations_per_timestep=cfg.td.iterations_per_timestep,
+        n_electrons=n_electrons
+      )
+      
+      else:
+        accumulate_samples, conduct_timestep = make_td_opt_update_step(
+          evaluate_loss=evaluate_loss, batch_network=batch_network, damping=cfg.td.damping, iterations_per_timestep=cfg.td.iterations_per_timestep
+        )
+
+        step = make_time_evolution_step(
         mcmc_step=mcmc_step, optimizer=optimizer,
         accumulate_samples=accumulate_samples, conduct_timestep=conduct_timestep,
         iterations_per_timestep=cfg.td.iterations_per_timestep,
         n_electrons=n_electrons,
-        cg_iterations=cg_iterations
+        cg_iterations=cfg.td.cg_iterations
       )
 
       if cfg.td.estimate_error:

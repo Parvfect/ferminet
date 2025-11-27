@@ -11,6 +11,117 @@ from ferminet import networks
 from ferminet import constants
 
 
+def make_td_opt_update_step_full_solve(
+    evaluate_loss, batch_network,
+    iterations_per_timestep,
+     ac=1e-5, rc=1e-4
+):
+  """
+  Helper functions for td opt update using full psuedoinverse.
+  Accumulates fisher (accumulate_samples) over iterations_per_timestep
+  Inverts and obtain parameter velocities in conduct_timestep
+  """
+
+  loss_and_grad = jax.value_and_grad(
+    evaluate_loss, argnums=0, has_aux=True
+  )
+
+  def accumulate_samples(
+      params, key, data, time, grad_vector,
+      fisher
+  ):
+    
+    # Getting loss and loss grads
+    (loss, aux_data), grad = loss_and_grad(params, key, data, time)
+    flat_grads, unravel_fn = jax.flatten_util.ravel_pytree(grad)
+    energies = aux_data.local_energy - loss
+    batch_size = energies.shape[0]
+    total_batch_size = batch_size * iterations_per_timestep
+
+    # Getting the Fisher
+    def compute_SR_chunked(params, data, chunk_size=256):
+        """Compute S = O^T O and mean(O) using chunks."""
+        
+        N = data.positions.shape[0]
+
+        flat_params, unravel = jax.flatten_util.ravel_pytree(params)
+        Np = flat_params.shape[0]
+
+        S = jnp.zeros((Np, Np), dtype=float)
+        O_mean_accum = jnp.zeros((Np,), dtype=float)
+
+        total_samples = 0
+
+        for start in range(0, N, chunk_size):
+            end = min(start + chunk_size, N)
+            n_chunk = end - start
+
+            pos = data.positions[start:end]
+            spins = data.spins[start:end]
+            atoms = data.atoms[start:end]
+            charges = data.charges[start:end]
+
+            J_chunk = jax.jacrev(
+                lambda p: batch_network(p, pos, spins, atoms, charges)
+            )(params)
+
+            per_leaf = [
+                jnp.reshape(leaf, (leaf.shape[0], -1))
+                for leaf in jax.tree_util.tree_leaves(J_chunk)
+            ]
+            O_chunk = jnp.concatenate(per_leaf, axis=1)
+
+            O_mean_accum += jnp.sum(O_chunk, axis=0)
+
+            S += O_chunk.T @ O_chunk
+
+            total_samples += n_chunk
+
+        # Compute final mean
+        O_mean = O_mean_accum / total_samples
+
+        return S, O_mean, unravel
+
+    S, O_mean, unravel = compute_SR_chunked(
+      params, data, chunk_size=256)
+    
+    S = (S - data.positions.shape[0] * jnp.outer(
+      O_mean, O_mean)) / total_batch_size  # TODO: Double check where the centering happens
+
+    grad_vector += flat_grads / iterations_per_timestep
+    fisher += S
+
+    return loss, aux_data, grad_vector, fisher 
+
+  def conduct_timestep(
+      params, key, data, grad_vector, fisher,  batch_size
+  ):
+    flat_params, unravel_fn = jax.flatten_util.ravel_pytree(params)
+    n_params = flat_params.shape[0]
+
+    _, s, vh = jnp.linalg.svd(a=fisher, hermitian=True)
+
+    # Smooth cutoff - Medvidovic et al (2023)
+    lambda2 = jnp.max(s) ** 2
+    log_ratio6 = 6.0 * (jnp.log(lambda2) - jnp.log(s + 1e-40))
+    ratio6 = jnp.exp(jnp.clip(log_ratio6, -50, 50))   # safer exponent
+    
+    eff_rank = jnp.mean(ratio6)
+    f = 1.0 / (1.0 + ratio6)
+    s_inv = f / (s + 1e-40)  # Prevent blowup
+
+    # Regularizing
+    SR_inv = (vh.T * s_inv) @ vh
+
+    # Solve SR * theta_dot = grad_vector
+    theta_dot = SR_inv @ grad_vector
+    
+    r2 = jnp.conjugate(theta_dot) @ fisher @ theta_dot + jnp.imag(
+      jnp.conjugate(grad_vector) * theta_dot) # residual - integrated infidelity
+
+    return theta_dot, r2, eff_rank
+
+
 def make_td_opt_update_step(
     evaluate_loss, batch_network, 
     damping=1e-2, iterations_per_timestep=10):
@@ -191,8 +302,8 @@ def make_time_evolution_step(
 ):
   """Makes time evolution step from Carleo's paper (Nys 2024) by fitting the 
   parameter update to time evolution of the state. For each dt, accumulates 
-  samples for (iterations_per_timestep) and then gets $\\theta_{dot}$ as
-  per $XX^T \\theta_dot = X \\epsilon$. The resulting $\\theta_{dot}$ 
+  samples for (iterations_per_timestep) and then gets $theta_{dot}$ as
+  per $XX^T theta_dot = X epsilon$. The resulting $theta_{dot}$ 
   out of make_evolution_step is the final vector after dt.
   RK2 is implemented over the dt calculation, which can be
   adjusted as needed to deal with time integration.
@@ -229,8 +340,8 @@ def make_time_evolution_step(
 
       positions = lax.dynamic_slice(
           position_arr,
-          (i * batch_size, 0),           # start index (row_offset, col_offset)
-          (batch_size, position_arr.shape[1])   # slice shape
+          (i * batch_size, 0),
+          (batch_size, position_arr.shape[1])
       )
 
       accumulated_data = networks.FermiNetData(
@@ -241,7 +352,8 @@ def make_time_evolution_step(
       )
 
       data, pmove = mcmc_step(
-        params, accumulated_data, mcmc_key, mcmc_width)
+        params, accumulated_data, mcmc_key, mcmc_width)  \
+          # TODO: Replace accumulated data with normal data here
       
       loss, aux_data, grad_vector = accumulate_samples(
         params, key, data, time, grad_vector)
@@ -339,6 +451,122 @@ def make_time_evolution_step(
       loss, aux_data, pmove, theta_dot_2, r2, eigs
 
   return step
+
+
+def make_time_evolution_step_low_sample_limit(
+    mcmc_step,
+    optimizer,
+    accumulate_samples,
+    conduct_timestep,
+    iterations_per_timestep,
+    n_electrons,
+    cg_iterations,
+    reset_if_nan: bool = False,
+):
+  """Makes time evolution step from Carleo's paper (Nys 2024) by fitting the 
+  parameter update to time evolution of the state. For each dt, accumulates 
+  samples for (iterations_per_timestep) and then gets $\\theta_{dot}$ as
+  per $XX^T \\theta_dot = X \\epsilon$. The resulting $\\theta_{dot}$ 
+  out of make_evolution_step is the final vector after dt.
+  RK2 is implemented over the dt calculation, which can be
+  adjusted as needed to deal with time integration.
+  """
+  @functools.partial(constants.pmap,
+                      in_axes=(0, 0, 0, None, 0, 0),
+                      donate_argnums=(0, 1, 2))
+  def step(
+    data: networks.FermiNetData,
+    params: networks.ParamTree,
+    opt_state: Optional[optax.OptState],
+    time: float,
+    key: chex.PRNGKey,
+    mcmc_width: jnp.ndarray,
+    time_integration_method = 'rk2'
+):
+    """
+    A full update iteration with integration: MCMC steps + optimization
+    For a single timestep
+    """
+    # MCMC loop
+
+    batch_size = data.positions.shape[0]
+    mcmc_key, loss_key = jax.random.split(key, num=2)
+    flat_params, unravel_fn = jax.flatten_util.ravel_pytree(
+      params)
+    n_params = flat_params.shape[0]
+    
+    spins, atoms, charges = data.spins, data.atoms, data.charges
+
+    def accumulate_samples_inner_fn(i, carry):
+      loss, aux_data, data, grad_vector, fisher, key, time = carry
+      mcmc_key, loss_key = jax.random.split(key)
+
+      data, pmove = mcmc_step(
+        params, data, mcmc_key, mcmc_width)
+      
+      loss, aux_data, grad_vector, fisher = accumulate_samples(
+        params, key, data, time, grad_vector, fisher)
+      
+      return loss, aux_data, data, grad_vector, fisher, key, time
+
+    logging.info(f"Starting sample accumulation for timestep")
+
+    def rk2_inner_fn(params, key, data, time):
+      
+      grad_vector = jnp.zeros((n_params))
+      fisher = jnp.zeros((n_params, n_params)) # TODO: Check memory footprint at this point
+
+      data, pmove = mcmc_step(
+        params, data, mcmc_key, mcmc_width)
+      
+      loss, aux_data, grad_vector, fisher = accumulate_samples(
+        params, key, data, time, grad_vector)
+      
+      
+      init_carry = (
+        loss, aux_data, data, grad_vector, fisher, key, time)
+      loss, aux_data, data, grad_vector, fisher, key, time = lax.fori_loop(
+          0, iterations_per_timestep, accumulate_samples_inner_fn, init_carry
+      )
+      
+      theta_dot, r2, eff_rank = conduct_timestep(
+        params, key, data, grad_vector, fisher,
+        batch_size)
+      
+      return data, pmove, loss, aux_data, theta_dot, r2, eff_rank
+
+    if time_integration_method == 'rk2':
+      
+      logging.info("Starting RK2 first step")
+      data, pmove, loss, aux_data, theta_dot_1, r2, eff_rank = constants.pmean(
+        rk2_inner_fn(params, key, data, time))
+      theta_dot_1 = -1j * theta_dot_1
+
+      half_updates, _ = optimizer.update(
+        unravel_fn(theta_dot_1 * 0.5), opt_state, params)
+      params_mid = optax.apply_updates(params, half_updates)
+
+      logging.info("Starting RK2 second step")
+      data, pmove, loss, aux_data, theta_dot_1, r2, eff_rank = constants.pmean(
+        rk2_inner_fn(params_mid, key, data, time))
+      theta_dot_2 = -1j * theta_dot_2
+
+      logging.info("Updating params")
+      updates, opt_state = optimizer.update(
+        unravel_fn(theta_dot_2), opt_state, params)
+      params = optax.apply_updates(params, updates)
+
+      logging.info("Completed timestep")
+
+    else:
+      raise NotImplementedError(
+        "Alternate time integration has not yet been implemented!")
+    
+    return data, params, opt_state, \
+      loss, aux_data, pmove, theta_dot_2, r2, eff_rank
+
+  return step
+
 
 
 def cg_err_estimator(
