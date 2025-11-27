@@ -88,7 +88,7 @@ def make_td_opt_update_step_full_solve(
       O_mean, O_mean))  # TODO: Double check where the centering happens
 
     grad_vector += flat_grads / iterations_per_timestep
-    fisher += S / batch_size
+    fisher += S / total_batch_size
 
     return loss, aux_data, grad_vector, fisher 
 
