@@ -1227,7 +1227,7 @@ def train(
             pickle.dump(tvmc_dict, f)
 
       else:
-        data, params, opt_state, loss, aux_data, pmove, theta_dot, r2, eigs = step(
+        data, params, opt_state, loss, aux_data, pmove, theta_dot, r2, eff_rank = step(
               data,
               params,
               opt_state,
@@ -1235,19 +1235,12 @@ def train(
               subkeys,
               mcmc_width)
         
-        print(eigs)
         #logging.info(f"{jnp.mean(theta_dot), jnp.max(theta_dot), jnp.min#(theta_dot), jnp.mean((theta_dot - jnp.mean(theta_dot) / n_params)**2)}")
         if r2 is not None:
-          logging.info(f"{jnp.mean(r2)}")
+          logging.info(f"Integrated infidelity {r2}")
+          logging.info(f"{eff_rank}")
           rk += jnp.mean(r2)
 
-        for l in range(5):
-          data, params, *_ = burn_in_step(
-            data,
-            params,
-            state=None,
-            key=subkeys,
-            mcmc_width=mcmc_width)
     else:
       data, params, opt_state, loss, aux_data, pmove = step(
             data,
@@ -1311,6 +1304,7 @@ def train(
 
       if cfg.td.time_evolution:
         writer_kwargs['rk'] = rk
+        writer_kwargs['eff_rank'] = eff_rank
 
       for key in observable_data:
         obs_data = observable_data[key]

@@ -25,7 +25,6 @@ def make_td_opt_update_step_full_solve(
   loss_and_grad = jax.value_and_grad(
     evaluate_loss, argnums=0, has_aux=True
   )
-
   def accumulate_samples(
       params, key, data, time, grad_vector,
       fisher
@@ -86,15 +85,15 @@ def make_td_opt_update_step_full_solve(
       params, data, chunk_size=256)
     
     S = (S - data.positions.shape[0] * jnp.outer(
-      O_mean, O_mean)) / total_batch_size  # TODO: Double check where the centering happens
+      O_mean, O_mean))  # TODO: Double check where the centering happens
 
     grad_vector += flat_grads / iterations_per_timestep
-    fisher += S
+    fisher += S / batch_size
 
     return loss, aux_data, grad_vector, fisher 
 
   def conduct_timestep(
-      params, key, data, grad_vector, fisher,  batch_size
+      params, grad_vector, fisher
   ):
     flat_params, unravel_fn = jax.flatten_util.ravel_pytree(params)
     n_params = flat_params.shape[0]
@@ -102,18 +101,22 @@ def make_td_opt_update_step_full_solve(
     _, s, vh = jnp.linalg.svd(a=fisher, hermitian=True)
 
     # Smooth cutoff - Medvidovic et al (2023)
-    lambda2 = jnp.max(s) ** 2
-    log_ratio6 = 6.0 * (jnp.log(lambda2) - jnp.log(s + 1e-40))
-    ratio6 = jnp.exp(jnp.clip(log_ratio6, -50, 50))   # safer exponent
+    #lambda2 = jnp.max(ac, rc * jnp.max(s)**2)
+    #log_ratio6 = 6.0 * (jnp.log(lambda2) - jnp.log(s + 1e-40))
+    #ratio6 = jnp.exp(jnp.clip(log_ratio6, -50, 50))   # safer exponent
     
-    eff_rank = jnp.mean(ratio6)
-    f = 1.0 / (1.0 + ratio6)
-    s_inv = f / (s + 1e-40)  # Prevent blowup
+    #eff_rank = jnp.sum(ratio6)
+    eff_rank = 0.0
+    #f = 1.0 / (1.0 + ratio6)
 
-    # Regularizing
-    SR_inv = (vh.T * s_inv) @ vh
+    eff_rank = (1/(1 + (1e-5 / s**2) ** 6))
+    #max_eig = jnp.max(s) ** 2
+    s = (1/s**2) * eff_rank  # From Medvidovic et al (2023)
 
-    # Solve SR * theta_dot = grad_vector
+    #eff_rank = jnp.sum(eff_rank)
+    
+    SR_inv = (vh.T * s) @ vh
+
     theta_dot = SR_inv @ grad_vector
     
     r2 = jnp.conjugate(theta_dot) @ fisher @ theta_dot + jnp.imag(
@@ -498,16 +501,18 @@ def make_time_evolution_step_low_sample_limit(
     spins, atoms, charges = data.spins, data.atoms, data.charges
 
     def accumulate_samples_inner_fn(i, carry):
-      loss, aux_data, data, grad_vector, fisher, key, time = carry
-      mcmc_key, loss_key = jax.random.split(key)
+      loss, aux_data, data, grad_vector, fisher, time, key = carry
+      mcmc_key, new_key = jax.random.split(key)
 
       data, pmove = mcmc_step(
         params, data, mcmc_key, mcmc_width)
       
-      loss, aux_data, grad_vector, fisher = accumulate_samples(
-        params, key, data, time, grad_vector, fisher)
+      loss_key, new_key = jax.random.split(key)
       
-      return loss, aux_data, data, grad_vector, fisher, key, time
+      loss, aux_data, grad_vector, fisher = accumulate_samples(
+        params, loss_key, data, time, grad_vector, fisher)
+      
+      return loss, aux_data, data, grad_vector, fisher, time, new_key
 
     logging.info(f"Starting sample accumulation for timestep")
 
@@ -516,27 +521,31 @@ def make_time_evolution_step_low_sample_limit(
       grad_vector = jnp.zeros((n_params))
       fisher = jnp.zeros((n_params, n_params)) # TODO: Check memory footprint at this point
 
+      mcmc_key, key = jax.random.split(key, num=2)
+
       data, pmove = mcmc_step(
         params, data, mcmc_key, mcmc_width)
       
+      loss_key, key = jax.random.split(key, num=2)
+
       loss, aux_data, grad_vector, fisher = accumulate_samples(
-        params, key, data, time, grad_vector, fisher)
+        params, loss_key, data, time, grad_vector, fisher)
       
       
       init_carry = (
-        loss, aux_data, data, grad_vector, fisher, key, time)
-      loss, aux_data, data, grad_vector, fisher, key, time = lax.fori_loop(
+        loss, aux_data, data, grad_vector, fisher, time, key)
+      loss, aux_data, data, grad_vector, fisher, time, key = lax.fori_loop(
           0, iterations_per_timestep, accumulate_samples_inner_fn, init_carry
       )
       
       theta_dot, r2, eff_rank = conduct_timestep(
-        params, key, data, grad_vector, fisher,
-        batch_size)
+        params, grad_vector, fisher)
       
       return data, pmove, loss, aux_data, theta_dot, r2, eff_rank
 
     if time_integration_method == 'rk2':
       
+      # TODO: Add mcmc burn in over here
       logging.info("Starting RK2 first step")
       data, pmove, loss, aux_data, theta_dot_1, r2, eff_rank = constants.pmean(
         rk2_inner_fn(params, key, data, time))
@@ -547,7 +556,7 @@ def make_time_evolution_step_low_sample_limit(
       params_mid = optax.apply_updates(params, half_updates)
 
       logging.info("Starting RK2 second step")
-      data, pmove, loss, aux_data, theta_dot_2, r2, eff_rank = constants.pmean(
+      data, pmove, _, _, theta_dot_2, r2, eff_rank = constants.pmean(
         rk2_inner_fn(params_mid, key, data, time))
       theta_dot_2 = -1j * theta_dot_2
 
