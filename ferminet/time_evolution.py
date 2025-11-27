@@ -120,6 +120,7 @@ def make_td_opt_update_step_full_solve(
       jnp.conjugate(grad_vector) * theta_dot) # residual - integrated infidelity
 
     return theta_dot, r2, eff_rank
+  return accumulate_samples, conduct_timestep
 
 
 def make_td_opt_update_step(
@@ -133,7 +134,7 @@ def make_td_opt_update_step(
   
   def accumulate_samples(
       params, key, data, time, grad_vector):
-    """Accumulates samples for right side of the equation $X\epsilon$"""
+    """Accumulates samples for right side of the equation $X epsilon$"""
 
     (loss, aux_data), grad = loss_and_grad(params, key, data, time)
     flat_grads, unravel_fn = jax.flatten_util.ravel_pytree(grad)
@@ -146,10 +147,10 @@ def make_td_opt_update_step(
       params, key, data, grad_vector, cg_iterations, batch_size,
       iterative=False):
     """
-    Solves for $XX^T \theta_dot = X\epsilon$
-    $X\epsilon$ is accumulated in the grad_vector
+    Solves for $XX^T theta_dot = X epsilon$
+    $X epsilon$ is accumulated in the grad_vector
     data passed in over the whole range of samples
-    Solves using an iterative solver for better estimates of $\theta_dot$
+    Solves using an iterative solver for better estimates of $theta_dot$
     """
 
     eigs = None
@@ -460,7 +461,6 @@ def make_time_evolution_step_low_sample_limit(
     conduct_timestep,
     iterations_per_timestep,
     n_electrons,
-    cg_iterations,
     reset_if_nan: bool = False,
 ):
   """Makes time evolution step from Carleo's paper (Nys 2024) by fitting the 
@@ -520,7 +520,7 @@ def make_time_evolution_step_low_sample_limit(
         params, data, mcmc_key, mcmc_width)
       
       loss, aux_data, grad_vector, fisher = accumulate_samples(
-        params, key, data, time, grad_vector)
+        params, key, data, time, grad_vector, fisher)
       
       
       init_carry = (
@@ -547,7 +547,7 @@ def make_time_evolution_step_low_sample_limit(
       params_mid = optax.apply_updates(params, half_updates)
 
       logging.info("Starting RK2 second step")
-      data, pmove, loss, aux_data, theta_dot_1, r2, eff_rank = constants.pmean(
+      data, pmove, loss, aux_data, theta_dot_2, r2, eff_rank = constants.pmean(
         rk2_inner_fn(params_mid, key, data, time))
       theta_dot_2 = -1j * theta_dot_2
 
