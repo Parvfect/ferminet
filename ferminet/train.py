@@ -697,7 +697,7 @@ def get_training_step_function(
         mcmc_step=mcmc_step, optimizer=optimizer,
         accumulate_samples=accumulate_samples, conduct_timestep=conduct_timestep,
         iterations_per_timestep=cfg.td.iterations_per_timestep,
-        n_electrons=n_electrons
+        n_electrons=n_electrons, burn_in_per_timestep=cfg.td.burn_in_per_timestep
       )
       
       else:

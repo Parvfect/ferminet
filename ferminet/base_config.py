@@ -341,6 +341,7 @@ def default() -> ml_collections.ConfigDict:
         'cg_iterations': 2000,
         'estimate_error': False,
         'full_solve': True,
+        'burn_in_per_timestep': 10,
         'ac': 1e-5,
         'rc': 1e-4
       },

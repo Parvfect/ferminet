@@ -442,6 +442,7 @@ def make_time_evolution_step_low_sample_limit(
     conduct_timestep,
     iterations_per_timestep,
     n_electrons,
+    burn_in_per_timestep,
     reset_if_nan: bool = False,
 ):
   """Makes time evolution step from Carleo's paper (Nys 2024) by fitting the 
@@ -520,6 +521,16 @@ def make_time_evolution_step_low_sample_limit(
         params, grad_vector, fisher)
       
       return data, pmove, loss, aux_data, theta_dot, r2, eff_rank
+    
+    # Burn in for that timestep
+    mcmc_key, key = jax.random.split(key, num=2)
+    for i in range(burn_in_per_timestep):
+      data, params, *_ = mcmc_step(
+            data,
+            params,
+            state=None,
+            key=mcmc_key,
+            mcmc_width=mcmc_width)
 
     if time_integration_method == 'rk2':
       
