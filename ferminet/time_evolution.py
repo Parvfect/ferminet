@@ -30,30 +30,22 @@ def make_td_opt_update_step_full_solve(
       fisher
   ):
     
-    # Getting loss and loss grads
     (loss, aux_data), grad = loss_and_grad(params, key, data, time)
     flat_grads, unravel_fn = jax.flatten_util.ravel_pytree(grad)
     energies = aux_data.local_energy - loss
     batch_size = energies.shape[0]
-    total_batch_size = batch_size * iterations_per_timestep
 
     # Getting the Fisher
     def compute_SR_chunked(params, data, chunk_size=256):
         """Compute S = O^T O and mean(O) using chunks."""
         
         N = data.positions.shape[0]
-
         flat_params, unravel = jax.flatten_util.ravel_pytree(params)
         Np = flat_params.shape[0]
-
         S = jnp.zeros((Np, Np), dtype=float)
-        O_mean_accum = jnp.zeros((Np,), dtype=float)
-
-        total_samples = 0
 
         for start in range(0, N, chunk_size):
             end = min(start + chunk_size, N)
-            n_chunk = end - start
 
             pos = data.positions[start:end]
             spins = data.spins[start:end]
@@ -70,23 +62,14 @@ def make_td_opt_update_step_full_solve(
             ]
             O_chunk = jnp.concatenate(per_leaf, axis=1)
 
-            O_mean_accum += jnp.sum(O_chunk, axis=0)
-
             S += O_chunk.T @ O_chunk
+        return S
 
-            total_samples += n_chunk
-
-        # Compute final mean
-        O_mean = O_mean_accum / total_samples
-
-        return S, O_mean, unravel
-
-    S, O_mean, unravel = compute_SR_chunked(
+    S = compute_SR_chunked(
       params, data, chunk_size=256)
     
-    S = (S - data.positions.shape[0] * jnp.outer(
-      O_mean, O_mean))  # TODO: Double check where the centering happens
-
+    total_batch_size = batch_size * iterations_per_timestep
+    
     grad_vector += flat_grads / iterations_per_timestep
     fisher += S / total_batch_size
 
@@ -95,8 +78,12 @@ def make_td_opt_update_step_full_solve(
   def conduct_timestep(
       params, grad_vector, fisher
   ):
+    
     flat_params, unravel_fn = jax.flatten_util.ravel_pytree(params)
     n_params = flat_params.shape[0]
+
+    # Centering gradients
+    fisher -= jnp.mean(fisher)
 
     _, s, vh = jnp.linalg.svd(a=fisher, hermitian=True)
 
@@ -253,30 +240,21 @@ def make_td_opt_update_step(
             ]
             O_chunk = jnp.concatenate(per_leaf, axis=1)
 
-            # Accumulate mean
-            O_mean_accum += jnp.sum(O_chunk, axis=0)
-
             # Accumulate S = O^T O
             S += O_chunk.T @ O_chunk
 
-            total_samples += n_chunk
+        return S
 
-        # Compute final mean
-        O_mean = O_mean_accum / total_samples
-
-        return S, O_mean, unravel
-
-      S, O_mean, unravel = compute_SR_chunked(
+      S = compute_SR_chunked(
         params, data, chunk_size=256)
-      O = S - data.positions.shape[0] * jnp.outer(O_mean, O_mean)
-      #O = O - jnp.mean(O, axis=0)
-      O = (O.T @ O) / O.shape[0]
 
       # Solve directly
-      _, s, vh = jnp.linalg.svd(a=O, hermitian=True)
+      _, s, vh = jnp.linalg.svd(a=S, hermitian=True)
 
       max_eig = jnp.max(s) ** 2
-      s = jnp.where(s < 1e-3, (1/s**2)*(1/(1 + ((max_eig * 1e-4) / s**2) ** 6)), (1/s**2))
+      s = jnp.where(
+        s < 1e-3, (1/s**2)*(1/(1 + (
+          (max_eig * 1e-4) / s**2) ** 6)), (1/s**2))
       # Reconstruct SR^{-1}
       SR_inv = (vh.T * s) @ vh
 
