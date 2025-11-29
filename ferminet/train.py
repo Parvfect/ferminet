@@ -1241,6 +1241,14 @@ def train(
           logging.info(f"{eff_rank}")
           rk += jnp.mean(r2)
 
+        # Burn in for that timestep
+        """
+        mcmc_key, subkeys = jax.random.split(subkeys, num=2)
+        for i in range(cfg.td.burn_in_per_timestep):
+          data, params, *_ = mcmc_step(
+                params, data, mcmc_key, mcmc_width)
+        """
+
     else:
       data, params, opt_state, loss, aux_data, pmove = step(
             data,

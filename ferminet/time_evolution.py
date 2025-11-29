@@ -521,16 +521,9 @@ def make_time_evolution_step_low_sample_limit(
         params, grad_vector, fisher)
       
       return data, pmove, loss, aux_data, theta_dot, r2, eff_rank
-    
-    # Burn in for that timestep
-    mcmc_key, key = jax.random.split(key, num=2)
-    for i in range(burn_in_per_timestep):
-      data, params, *_ = mcmc_step(
-            params, data, mcmc_key, mcmc_width)
 
     if time_integration_method == 'rk2':
       
-      # TODO: Add mcmc burn in over here
       logging.info("Starting RK2 first step")
       data, pmove, loss, aux_data, theta_dot_1, r2, eff_rank = constants.pmean(
         rk2_inner_fn(params, key, data, time))
