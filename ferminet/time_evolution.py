@@ -526,11 +526,7 @@ def make_time_evolution_step_low_sample_limit(
     mcmc_key, key = jax.random.split(key, num=2)
     for i in range(burn_in_per_timestep):
       data, params, *_ = mcmc_step(
-            data,
-            params,
-            state=None,
-            key=mcmc_key,
-            mcmc_width=mcmc_width)
+            params, data, mcmc_key, mcmc_width)
 
     if time_integration_method == 'rk2':
       
