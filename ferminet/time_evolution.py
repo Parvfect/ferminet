@@ -11,6 +11,36 @@ from ferminet import networks
 from ferminet import constants
 
 
+def pe_e_field(E_max, w, dt):
+  E_vec = jnp.array([0.0, 0.0, 1.0])
+  T = (2 * 3.14) / (w)
+
+  # the t stepping here is t * dt, since t is controlled in the outer loop
+  # eff t = t + dt
+  def get_envelope(t):
+    return jnp.where(
+      t < T, t/T, jnp.where(
+        t < 2 * T, 1, jnp.where(
+          t < 3 * T, 3 - t/T, jnp.where(
+            t >= 3 * T, 0, 0 
+          ))))
+  
+  def eff_pe(pos, t):
+    eff_time = t * dt
+    w2 = get_envelope(eff_time)
+    return - sum([
+    E_max * jnp.sin(w * eff_time) * w2 * jnp.dot(
+      E_vec, pos[k: k + 3]) for k in range(
+      0, pos.shape[0], 3)])
+
+  def pe_tot(t):
+    eff_time = t * dt
+    w2 = get_envelope(eff_time)
+    return E_max * jnp.sin(w * eff_time) * w2
+  
+  return eff_pe, pe_tot
+
+
 def make_td_opt_update_step_full_solve(
     evaluate_loss, batch_network,
     iterations_per_timestep,
@@ -93,14 +123,13 @@ def make_td_opt_update_step_full_solve(
     #ratio6 = jnp.exp(jnp.clip(log_ratio6, -50, 50))   # safer exponent
     
     #eff_rank = jnp.sum(ratio6)
-    eff_rank = 0.0
     #f = 1.0 / (1.0 + ratio6)
 
-    eff_rank = (1/(1 + (1e-5 / s**2) ** 6))
-    #max_eig = jnp.max(s) ** 2
+    eff_rank = 1/(1 + (1e-5 / s**2) ** 6)
+  
     s = (1/s**2) * eff_rank  # From Medvidovic et al (2023)
 
-    #eff_rank = jnp.sum(eff_rank)
+    eff_rank = jnp.sum(eff_rank)
     
     SR_inv = (vh.T * s) @ vh
 
@@ -318,7 +347,7 @@ def make_time_evolution_step(
 
     def accumulate_samples_inner_fn(i, carry):
       loss, aux_data, position_arr, grad_vector, key, time = carry
-      mcmc_key, loss_key = jax.random.split(key)
+      mcmc_key, key = jax.random.split(key)
 
       positions = lax.dynamic_slice(
           position_arr,
@@ -336,9 +365,11 @@ def make_time_evolution_step(
       data, pmove = mcmc_step(
         params, accumulated_data, mcmc_key, mcmc_width)  \
           # TODO: Replace accumulated data with normal data here
+
+      loss_key, key = jax.random.split(key)
       
       loss, aux_data, grad_vector = accumulate_samples(
-        params, key, data, time, grad_vector)
+        params, loss_key, data, time, grad_vector)
       
       position_arr = lax.dynamic_update_slice(
           position_arr,
@@ -357,11 +388,15 @@ def make_time_evolution_step(
         (iterations_per_timestep * batch_size, n_electrons*3)
       )
 
+      mcmc_key, key = jax.random.split(key)
+
       data, pmove = mcmc_step(
         params, data, mcmc_key, mcmc_width)
       
+      loss_key, key = jax.random.split(key)
+      
       loss, aux_data, grad_vector = accumulate_samples(
-        params, key, data, time, grad_vector)
+        params, loss_key, data, time, grad_vector)
       
       position_arr = lax.dynamic_update_slice(
           position_arr,
@@ -371,7 +406,7 @@ def make_time_evolution_step(
       
       init_carry = (
         loss, aux_data, position_arr, grad_vector, key, time)
-      loss, aux_data, position_arr, final_grad_vector, final_key, time = lax.fori_loop(
+      loss, aux_data, position_arr, final_grad_vector, key, time = lax.fori_loop(
           0, iterations_per_timestep, accumulate_samples_inner_fn, init_carry
       )
 

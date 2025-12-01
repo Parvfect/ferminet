@@ -337,13 +337,20 @@ def default() -> ml_collections.ConfigDict:
         'time_evolution': False,
         'damping': 1e-6,
         'iterations_per_timestep': 10,
-        'dt': 1e-3,
+        'parameter_step': 1e-3,
         'cg_iterations': 2000,
         'estimate_error': False,
-        'full_solve': True,
-        'burn_in_per_timestep': 10,
-        'ac': 1e-5,
-        'rc': 1e-4
+        'full_solve': True,  # Inversion using psuedoinverse and regularization
+        'burn_in_per_timestep': 2,
+        'regularization' : {
+          'ac': 1e-5,  # Minimum value for setting eigenvalue to zero
+          'rc': 1e-4,  # max (ac, rc x max(eig)) From Medvidovic et al (2023)
+        },
+        'field' : {  # E_field parameters from Nys et al (2024)
+          'E_max': 0.06,
+          'w': 0.3,
+          'dt': 0.25,
+        },
       },
       'debug_mode': False,
       'debug_options': {

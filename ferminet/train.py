@@ -42,7 +42,9 @@ from ferminet.utils import writers
 from ferminet.stochastic_reconfiguration import \
   make_sr_opt_update_step, make_sr_training_step
 from ferminet.time_evolution import \
-    make_td_opt_update_step, make_time_evolution_step, cg_err_estimator, make_td_opt_update_step_full_solve, make_time_evolution_step_low_sample_limit
+    make_td_opt_update_step, make_time_evolution_step, cg_err_estimator, \
+    make_td_opt_update_step_full_solve, make_time_evolution_step_low_sample_limit, \
+    pe_e_field
 from ferminet.training_monitoring import wandb_login, start_wandb_run
 from ferminet.visual_tools import \
   plot_electron_histograms, plot_combined_electron_positions, plot_electron_presence_map
@@ -648,17 +650,11 @@ def optimizer_setup(
   elif cfg.optim.optimizer == 'sr' or cfg.td.time_evolution:
 
     if cfg.td.time_evolution:
-      iterations_per_timestep = cfg.optim.sr.iterations_per_timestep
-      dt = cfg.td.dt
       
       optimizer = optax.chain(
         store_last_gradient(),
-        optax.scale(dt),
+        optax.scale(cfg.td.parameter_step),
         optax.scale(-1.),)
-          
-      #flat_params, unravel_fn = jax.flatten_util.ravel_pytree(params)
-      #n_params = flat_params.shape[0]
-      #theta_dot = jnp.zeros((iterations_per_timestep, n_params))  
 
     else:
       optimizer = optax.chain(
@@ -687,11 +683,13 @@ def get_training_step_function(
 
 
     if cfg.td.time_evolution:
-      n_electrons = sum(int(round(atom.charge)) for atom in cfg.system.molecule)
+      n_electrons = sum(
+        int(round(atom.charge)) for atom in cfg.system.molecule)
 
       if cfg.td.full_solve:
         accumulate_samples, conduct_timestep = make_td_opt_update_step_full_solve(
-          evaluate_loss, batch_network, cfg.td.iterations_per_timestep, cfg.td.ac, cfg.td.rc
+          evaluate_loss, batch_network, cfg.td.iterations_per_timestep,
+          cfg.td.regularization.ac, cfg.td.regularization.rc
         )
         step = make_time_evolution_step_low_sample_limit(
         mcmc_step=mcmc_step, optimizer=optimizer,
@@ -843,7 +841,8 @@ def make_local_energy_functions(cfg, signed_network, charges):
         states=cfg.system.get('states', 0),
         state_specific=(cfg.optim.objective == 'vmc_overlap'),
         pp_type=cfg.system.get('pp', {'type': 'ccecp'}).get('type'),
-        pp_symbols=pp_symbols if cfg.system.get('use_pp') else None)
+        pp_symbols=pp_symbols if cfg.system.get('use_pp') else None,
+        cfg=cfg)
 
   if cfg.optim.get('spin_energy', 0.0) > 0.0:
     # Minimize <H + c * S^2> instead of just <H>
@@ -1176,6 +1175,9 @@ def train(
         log=False)
 
   batch_network_pmapped = constants.pmap(batch_network)
+  eff_pe, pe_tot = pe_e_field(
+    cfg.td.field.E_max, cfg.td.field.w, cfg.td.field.dt)
+  vmapped_E = jax.vmap(eff_pe, in_axes=(0, None))
 
   if cfg.debug_options.notebook:  # For testing applications via jupyter
     return evaluate_loss, mcmc_step, sharded_key, data, params, mcmc_width, logabs_network
@@ -1198,6 +1200,7 @@ def train(
 
     sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
     if cfg.td.time_evolution:
+      simulation_time = t - t_init
 
       if cfg.td.estimate_error:
           theta_dot_mean_per_iteration, theta_dot_var_per_iteration, \
@@ -1231,23 +1234,35 @@ def train(
               data,
               params,
               opt_state,
-              t - t_init,
+              simulation_time,
               subkeys,
               mcmc_width)
         
-        #logging.info(f"{jnp.mean(theta_dot), jnp.max(theta_dot), jnp.min#(theta_dot), jnp.mean((theta_dot - jnp.mean(theta_dot) / n_params)**2)}")
         if r2 is not None:
-          logging.info(f"Integrated infidelity {r2}")
-          logging.info(f"{eff_rank}")
+          #logging.info(f"Integrated infidelity {r2}")
+          #logging.info(f"{eff_rank}")
           rk += jnp.mean(r2)
 
+        try:
+          E_eff = jnp.mean(vmapped_E(data.positions[0], simulation_time))  # TODO: Make removin pmapping by pmean or something
+        except Exception as e:
+          print("Effective E field action computation failed")
+          print(e)
+          E_eff = 0.0
+        E_total = pe_tot(simulation_time)
+       
         # Burn in for that timestep
-        """
-        mcmc_key, subkeys = jax.random.split(subkeys, num=2)
-        for i in range(cfg.td.burn_in_per_timestep):
-          data, params, *_ = mcmc_step(
-                params, data, mcmc_key, mcmc_width)
-        """
+        try:
+          mcmc_key, subkeys = kfac_jax.utils.p_split(sharded_key)
+          for i in range(cfg.td.burn_in_per_timestep):
+            data, params, *_ = burn_in_step(
+                data,
+                params,
+                state=None,
+                key=mcmc_key,
+                mcmc_width=mcmc_width)
+        except Exception as e:
+          print(f"MCMC burn in failed\n{e}\n")
 
     else:
       data, params, opt_state, loss, aux_data, pmove = step(
@@ -1313,6 +1328,9 @@ def train(
       if cfg.td.time_evolution:
         writer_kwargs['rk'] = rk
         writer_kwargs['eff_rank'] = eff_rank
+        writer_kwargs['simulation_time'] = simulation_time
+        writer_kwargs['E_tot'] = E_total
+        writer_kwargs['E_eff'] = E_eff
 
       for key in observable_data:
         obs_data = observable_data[key]

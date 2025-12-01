@@ -263,31 +263,23 @@ def excited_kinetic_energy_matrix(
   return _lapl_over_f
 
 
-def potential_electric_field(pos: Array, t: int):
-  E_vec = jnp.array([0.0, 0.0, 1.0]) # Unit vector along z direction
+def potential_electric_field(pos: Array, t, E_max, w, dt):
+
+  def get_envelope(t):
+    T = 2 * 3.14 / (w)
+    return jnp.where(
+        t < T, t/T, jnp.where(
+          t < 2 * T, 1, jnp.where(
+            t < 3 * T, 3 - t/T, jnp.where(
+              t >= 3 * T, 0, 0 
+            ))))
   
-  E_max = 2.0
-  w = 1e-20
+  E_vec = jnp.array([0.0, 0.0, 1.0]) # Unit vector along z direction
+  eff_time = dt * t # Doing dt - t controlled in outer loop
+  w2 = get_envelope(eff_time)
 
-  t = 0.01 * t # Doing dt - quite abrupt, but let's see
-
-  T = 2 * 3.14 / w # period
-
-  w2 = jnp.where(
-    t < T, t/T, jnp.where(
-      t < 2 * T, 1, jnp.where(
-        t < 3 * T, 3 - t/T, jnp.where(
-          t >= 3 * T, 0, 0 
-        )
-      )
-    )
-  )
-
-  w2 = 1.0
-
-  # Add the dot product here, testing if that is at fault
   return - sum([
-    E_max * jnp.sin(w * t) * w2 * jnp.dot(E_vec, pos[k: k + 3]) for k in range(
+    E_max * jnp.sin(w * eff_time) * w2 * jnp.dot(E_vec, pos[k: k + 3]) for k in range(
       0, pos.shape[0], 3)])
 
 
@@ -326,8 +318,7 @@ def potential_nuclear_nuclear(charges: Array, atoms: Array) -> jnp.ndarray:
       jnp.triu((charges[None, ...] * charges[..., None]) / r_aa, k=1))
 
 
-def potential_energy(r_ae: Array, r_ee: Array, atoms: Array,
-                     charges: Array, time: int = 0, pos: Array = None) -> jnp.ndarray:
+def potential_energy(E_max, w, dt):
   """Returns the potential energy for this electron configuration.
 
   Args:
@@ -339,11 +330,14 @@ def potential_energy(r_ae: Array, r_ee: Array, atoms: Array,
     atoms: Shape (natoms, ndim). Positions of the atoms.
     charges: Shape (natoms). Nuclear charges of the atoms.
   """
-  return (potential_electron_electron(r_ee) +
-          potential_electron_nuclear(charges, r_ae) +
-          potential_nuclear_nuclear(charges, atoms) +
-          potential_electric_field(pos, time)
-          )
+  def pe(r_ae: Array, r_ee: Array, atoms: Array,
+                     charges: Array, time, pos: Array = None) -> jnp.ndarray:
+    return (potential_electron_electron(r_ee) +
+            potential_electron_nuclear(charges, r_ae) +
+            potential_nuclear_nuclear(charges, atoms) +
+            potential_electric_field(pos, time, E_max, w, dt)
+            )
+  return pe
 
 
 def local_energy(
@@ -357,6 +351,7 @@ def local_energy(
     state_specific: bool = False,
     pp_type: str = 'ccecp',
     pp_symbols: Sequence[str] | None = None,
+    cfg=None
 ) -> LocalEnergy:
   """Creates the function to evaluate the local energy.
 
@@ -404,9 +399,16 @@ def local_energy(
     pp_local = lambda *args, **kwargs: 0.0
     pp_nonlocal = lambda *args, **kwargs: 0.0
 
+  if cfg:  # Time evolution
+    E_max = cfg.td.field.E_max
+    w = cfg.td.field.w
+    dt = cfg.td.field.dt
+  else:
+    E_max, w, dt = 0.0, 0.0, 0.0
+
   def _e_l(
       params: networks.ParamTree, key: chex.PRNGKey, data: networks.FermiNetData,
-      time: int = 0
+      time:int = 0
   ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray]]:
     """Returns the total energy.
 
@@ -476,7 +478,10 @@ def local_energy(
           data.positions, data.atoms
       )
 
-      potential = (potential_energy(r_ae, r_ee, data.atoms, effective_charges, time, data.positions) +
+      pe = potential_energy(E_max, w, dt)
+      potential = (pe(
+                      r_ae, r_ee, data.atoms, effective_charges,
+                      time, data.positions) +
                    pp_local(r_ae) +
                    pp_nonlocal(key, f, params, data, ae, r_ae))
       kinetic = ke(params, data)
