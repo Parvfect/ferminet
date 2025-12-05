@@ -65,7 +65,6 @@ def make_td_opt_update_step_full_solve(
     energies = aux_data.local_energy - loss
     batch_size = energies.shape[0]
 
-    # Getting the Fisher
     def compute_SR_chunked(params, data, chunk_size=256):
         """Compute S = O^T O and mean(O) using chunks."""
         
@@ -124,8 +123,11 @@ def make_td_opt_update_step_full_solve(
     
     #eff_rank = jnp.sum(ratio6)
     #f = 1.0 / (1.0 + ratio6)
+    #max_eig = jnp.max(s)
+    #regularized_term = jnp.max(ac, max_eig**2 * rc )  # TODO: Fix tracer error
+    regularized_term = ac
 
-    eff_rank = 1/(1 + (1e-5 / s**2) ** 6)
+    eff_rank = 1/(1 + (regularized_term / s**2) ** 6)  # TODO: Replace this with max eigenvalue weighting - should bring the error down
   
     s = (1/s**2) * eff_rank  # From Medvidovic et al (2023)
 
@@ -135,10 +137,20 @@ def make_td_opt_update_step_full_solve(
 
     theta_dot = SR_inv @ grad_vector
     
-    r2 = jnp.conjugate(theta_dot) @ fisher @ theta_dot + jnp.imag(
-      jnp.conjugate(grad_vector) * theta_dot) # residual - integrated infidelity
+    A = jnp.conjugate(theta_dot) @ fisher @ theta_dot  # Fisher part of residual
+    B = jnp.imag(
+      jnp.conjugate(grad_vector) * theta_dot)  # Force vector part of residual
+    r = fisher @ theta_dot + 1j * grad_vector  # Inversion checker
+    r2 = A + B  # Carleo's residual - integrated infidelity
+    metrics = {
+      "force_vector_residual": A,
+      "S_residual": B,
+      "linear_system_residual": r,
+      "r2": r2,
+      "effective_rank": eff_rank
+    }
 
-    return theta_dot, r2, eff_rank
+    return theta_dot, metrics
   return accumulate_samples, conduct_timestep
 
 
@@ -151,7 +163,7 @@ def make_td_opt_update_step(
   loss_and_grad = jax.value_and_grad(
     evaluate_loss, argnums=0, has_aux=True)
   
-  def accumulate_samples(
+  def accumulate_samples_(
       params, key, data, time, grad_vector):
     """Accumulates samples for right side of the equation $X epsilon$"""
 
@@ -162,9 +174,8 @@ def make_td_opt_update_step(
 
     return loss, aux_data, grad_vector + flat_grads / iterations_per_timestep
   
-  def conduct_timestep(
-      params, key, data, grad_vector, cg_iterations, batch_size,
-      iterative=False):
+  def conduct_timestep_(
+      params, key, data, grad_vector, cg_iterations, batch_size):
     """
     Solves for $XX^T theta_dot = X epsilon$
     $X epsilon$ is accumulated in the grad_vector
@@ -172,7 +183,6 @@ def make_td_opt_update_step(
     Solves using an iterative solver for better estimates of $theta_dot$
     """
 
-    eigs = None
     flat_params, unravel_fn = jax.flatten_util.ravel_pytree(params)
     n_params = flat_params.shape[0]
   
@@ -180,8 +190,6 @@ def make_td_opt_update_step(
       psi = batch_network(
         params, data.positions, data.spins, data.atoms, data.charges)
       return psi
-    
-    f = jax.checkpoint(f)
   
     jvp_func = lambda x: jax.linearize(f, params)[1](
       unravel_fn(x))
@@ -198,106 +206,32 @@ def make_td_opt_update_step(
       if centre_gradients:
           update_vector -= jnp.mean(update_vector)
       
-      update_vector += damping * v
+      update_vector += damping * v  # TODO: Test errors with no damping
       return update_vector
+  
+    x0 = grad_vector  # Using loss grads as guess      
+    theta_dot = jax.scipy.sparse.linalg.cg(
+      fisher_matmul, grad_vector, x0=x0,
+      maxiter=cg_iterations)[0]
     
-    if iterative:
-      x0 = grad_vector  # Using loss grads as guess        
-      theta_dot = jax.scipy.sparse.linalg.cg(
-        fisher_matmul, grad_vector, x0=x0,
-        maxiter=cg_iterations)[0]
-      
-    else:
-      """
-      def grad_i(params, i):
-        return jax.flatten_util.ravel_pytree(
-            jax.grad(lambda p: f(p)[i])(params)
-        )[0]
-
-      # Vectorize across samples → shape [N, n_params]
-      O = jax.vmap(
-        lambda i: grad_i(params, i))(
-          jnp.arange(data.positions.shape[0]))
-
-      O = O - jnp.mean(O, axis=0)
-      O = (O.T @ O) / O.shape[0]
-
-      # Solve directly
-      _, s, vh = jnp.linalg.svd(a=O, hermitian=True)
-      max_eig = jnp.max(s) ** 2
-      s = jnp.where(s < 1e-3, (1/s**2)*(1/(1 + ((max_eig * 1e-4) / s**2) ** 6)), (1/s**2))  # From Medvidovic et al (2023)
-      # Reconstruct SR^{-1}
-      SR_inv = (vh.T * s) @ vh
-
-      # Solve SR * theta_dot = grad_vector
-      theta_dot = SR_inv @ grad_vector
-      del O
-      """
-
-      def compute_SR_chunked(params, data, chunk_size=1024):
-        """Compute S = O^T O and mean(O) using chunks."""
-        
-        N = data.positions.shape[0]
-
-        flat_params, unravel = jax.flatten_util.ravel_pytree(params)
-        Np = flat_params.shape[0]
-
-        S = jnp.zeros((Np, Np), dtype=float)
-        O_mean_accum = jnp.zeros((Np,), dtype=float)
-
-        total_samples = 0
-
-        for start in range(0, N, chunk_size):
-            end = min(start + chunk_size, N)
-            n_chunk = end - start
-
-            # Slice data
-            pos = data.positions[start:end]
-            spins = data.spins[start:end]
-            atoms = data.atoms[start:end]
-            charges = data.charges[start:end]
-
-            # J_chunk is pytree: each leaf is (chunk, ...)
-            J_chunk = jax.jacrev(
-                lambda p: batch_network(p, pos, spins, atoms, charges)
-            )(params)
-
-            # Flatten leaves across param dims → (chunk, Np)
-            per_leaf = [
-                jnp.reshape(leaf, (leaf.shape[0], -1))
-                for leaf in jax.tree_util.tree_leaves(J_chunk)
-            ]
-            O_chunk = jnp.concatenate(per_leaf, axis=1)
-
-            # Accumulate S = O^T O
-            S += O_chunk.T @ O_chunk
-
-        return S
-
-      S = compute_SR_chunked(
-        params, data, chunk_size=256)
-
-      # Solve directly
-      _, s, vh = jnp.linalg.svd(a=S, hermitian=True)
-
-      max_eig = jnp.max(s) ** 2
-      s = jnp.where(
-        s < 1e-3, (1/s**2)*(1/(1 + (
-          (max_eig * 1e-4) / s**2) ** 6)), (1/s**2))
-      # Reconstruct SR^{-1}
-      SR_inv = (vh.T * s) @ vh
-
-      # Solve SR * theta_dot = grad_vector
-      theta_dot = SR_inv @ grad_vector
-      del O
+    A = jnp.conjugate(theta_dot) * fisher_matmul(
+      theta_dot)
+    B = jnp.imag(jnp.conjugate(grad_vector) * theta_dot)
+    r2 = A + B  # residual - integrated infidelity
+    r = fisher_matmul(theta_dot) + 1j * grad_vector
+    eff_rank = 0
     
-    
-    r2 = jnp.conjugate(theta_dot) * fisher_matmul(
-      theta_dot) + jnp.imag(jnp.conjugate(grad_vector) * theta_dot) # residual - integrated infidelity
+    metrics = {
+      "force_vector_residual": A,
+      "S_residual": B,
+      "linear_system_residual": r,
+      "r2": r2,
+      "effective_rank": eff_rank
+    }
     
 
-    return theta_dot, r2, s
-  return accumulate_samples, conduct_timestep
+    return theta_dot, metrics
+  return accumulate_samples_, conduct_timestep_
 
 
 
@@ -309,7 +243,9 @@ def make_time_evolution_step(
     iterations_per_timestep,
     n_electrons,
     cg_iterations,
-    reset_if_nan: bool = False,
+    burn_in_per_timestep=0,
+    time_integration = 'rk2',
+    reset_if_nan: bool = True,
 ):
   """Makes time evolution step from Carleo's paper (Nys 2024) by fitting the 
   parameter update to time evolution of the state. For each dt, accumulates 
@@ -329,7 +265,6 @@ def make_time_evolution_step(
     time: float,
     key: chex.PRNGKey,
     mcmc_width: jnp.ndarray,
-    time_integration_method = 'rk2'
 ):
     """
     A full update iteration with integration: MCMC steps + optimization
@@ -381,7 +316,7 @@ def make_time_evolution_step(
 
     logging.info(f"Starting sample accumulation for timestep")
 
-    def rk2_inner_fn(params, key, data, time):
+    def rk2_inner_fn(params, key, data, time):  # TODO: Make the general function iterative method specific
       
       grad_vector = jnp.zeros((n_params))
       position_arr = jnp.zeros(
@@ -419,21 +354,19 @@ def make_time_evolution_step(
           charges=jnp.repeat(
             data.charges, repeats=iterations_per_timestep, axis=0)
       )
-
-      theta_dot, r2 = None, None
       
-      theta_dot, r2, eigs = conduct_timestep(
+      theta_dot, metrics = conduct_timestep(
         params, key, data, final_grad_vector,
         cg_iterations, batch_size)
       
-      return loss, aux_data, theta_dot, r2, final_grad_vector, position_arr, pmove, eigs
-
-    if time_integration_method == 'rk2':
+      return data, pmove, loss, aux_data, theta_dot, metrics
       
-      logging.info("Starting RK2 first step")
-      loss, aux_data, theta_dot_1, _, _, _, pmove, eigs = constants.pmean(
-        rk2_inner_fn(params, key, data, time))
-      theta_dot_1 = -1j * theta_dot_1
+    logging.info("Starting integration first step")
+    data, pmove, loss, aux_data, theta_dot_1, metrics = constants.pmean(
+      rk2_inner_fn(params, key, data, time))
+    theta_dot_1 = -1j * theta_dot_1
+
+    if time_integration == 'rk2':
       #theta_dot_1 = -1j * grad_vector_1
 
       half_updates, _ = optimizer.update(
@@ -441,31 +374,34 @@ def make_time_evolution_step(
       params_mid = optax.apply_updates(params, half_updates)
 
       logging.info("Starting RK2 second step")
-      loss, aux_data, theta_dot_2, r2, _, _, pmove, eigs = constants.pmean(
+      data, pmove, loss, aux_data, theta_dot_2, metrics = constants.pmean(
         rk2_inner_fn(params_mid, key, data, time))
       theta_dot_2 = -1j * theta_dot_2
-      #theta_dot_2 = -1j * grad_vector_2
-
-      #theta_dot_2 = theta_dot_1
-
-      logging.info("Updating params")
-      # Step 4: Full step update with k2
-      updates, opt_state = optimizer.update(
-        unravel_fn(theta_dot_2), opt_state, params)
-      params = optax.apply_updates(params, updates)
-
-      #logging.info("Evaluating final energy")
-      """
-      loss, aux_data, _ = accumulate_samples(
-        new_params, key, data, time, jnp.zeros((n_params)))
-      """
+      theta_dot = theta_dot_2
 
     else:
-      raise NotImplementedError(
-        "Alternate time integration has not yet been implemented!")
+      theta_dot = theta_dot_1
+
+    logging.info("Updating params")
+    # Step 4: Full step update with k2
     
+    make_updates = False
+    if make_updates:
+      updates, opt_state = optimizer.update(
+        unravel_fn(theta_dot), opt_state, params)
+      
+      # Null update for now
+      params = optax.apply_updates(params, updates)
+        
+
+    #logging.info("Evaluating final energy")
+    """
+    loss, aux_data, _ = accumulate_samples(
+      new_params, key, data, time, jnp.zeros((n_params)))
+    """
+
     return data, params, opt_state, \
-      loss, aux_data, pmove, theta_dot_2, r2, eigs
+      loss, aux_data, pmove, theta_dot, metrics
 
   return step
 
@@ -479,6 +415,7 @@ def make_time_evolution_step_low_sample_limit(
     n_electrons,
     burn_in_per_timestep,
     reset_if_nan: bool = False,
+    time_integration = 'rk2'
 ):
   """Makes time evolution step from Carleo's paper (Nys 2024) by fitting the 
   parameter update to time evolution of the state. For each dt, accumulates 
@@ -497,8 +434,7 @@ def make_time_evolution_step_low_sample_limit(
     opt_state: Optional[optax.OptState],
     time: float,
     key: chex.PRNGKey,
-    mcmc_width: jnp.ndarray,
-    time_integration_method = 'rk2'
+    mcmc_width: jnp.ndarray
 ):
     """
     A full update iteration with integration: MCMC steps + optimization
@@ -507,12 +443,9 @@ def make_time_evolution_step_low_sample_limit(
     # MCMC loop
 
     batch_size = data.positions.shape[0]
-    mcmc_key, loss_key = jax.random.split(key, num=2)
     flat_params, unravel_fn = jax.flatten_util.ravel_pytree(
       params)
     n_params = flat_params.shape[0]
-    
-    spins, atoms, charges = data.spins, data.atoms, data.charges
 
     def accumulate_samples_inner_fn(i, carry):
       loss, aux_data, data, grad_vector, fisher, time, key = carry
@@ -533,7 +466,7 @@ def make_time_evolution_step_low_sample_limit(
     def rk2_inner_fn(params, key, data, time):
       
       grad_vector = jnp.zeros((n_params))
-      fisher = jnp.zeros((n_params, n_params)) # TODO: Check memory footprint at this point
+      fisher = jnp.zeros((n_params, n_params))
 
       mcmc_key, key = jax.random.split(key, num=2)
 
@@ -552,40 +485,41 @@ def make_time_evolution_step_low_sample_limit(
           0, iterations_per_timestep, accumulate_samples_inner_fn, init_carry
       )
       
-      theta_dot, r2, eff_rank = conduct_timestep(
+      theta_dot, metrics = conduct_timestep(
         params, grad_vector, fisher)
       
-      return data, pmove, loss, aux_data, theta_dot, r2, eff_rank
+      return data, pmove, loss, aux_data, theta_dot, metrics
 
-    if time_integration_method == 'rk2':
-      
-      logging.info("Starting RK2 first step")
-      data, pmove, loss, aux_data, theta_dot_1, r2, eff_rank = constants.pmean(
-        rk2_inner_fn(params, key, data, time))
-      theta_dot_1 = -1j * theta_dot_1
+    logging.info("Starting integration first step")
+    data, pmove, loss, aux_data, theta_dot_1, metrics = constants.pmean(
+      rk2_inner_fn(params, key, data, time))
+    theta_dot_1 = -1j * theta_dot_1
+
+    if time_integration == 'rk2':
 
       half_updates, _ = optimizer.update(
         unravel_fn(theta_dot_1 * 0.5), opt_state, params)
       params_mid = optax.apply_updates(params, half_updates)
 
       logging.info("Starting RK2 second step")
-      data, pmove, _, _, theta_dot_2, r2, eff_rank = constants.pmean(
+      data, pmove, _, _, theta_dot_2, metrics = constants.pmean(
         rk2_inner_fn(params_mid, key, data, time))
       theta_dot_2 = -1j * theta_dot_2
-
-      logging.info("Updating params")
-      updates, opt_state = optimizer.update(
-        unravel_fn(theta_dot_2), opt_state, params)
-      params = optax.apply_updates(params, updates)
-
-      logging.info("Completed timestep")
-
+      theta_dot = theta_dot_2
+    
     else:
-      raise NotImplementedError(
-        "Alternate time integration has not yet been implemented!")
+      theta_dot = theta_dot_1
+
+    logging.info("Updating params")
+    updates, opt_state = optimizer.update(
+      unravel_fn(theta_dot), opt_state, params)
+    params = optax.apply_updates(params, updates)
+
+    logging.info("Completed timestep")
+
     
     return data, params, opt_state, \
-      loss, aux_data, pmove, theta_dot_2, r2, eff_rank
+      loss, aux_data, pmove, theta_dot, metrics
 
   return step
 

@@ -45,6 +45,7 @@ from ferminet.time_evolution import \
     make_td_opt_update_step, make_time_evolution_step, cg_err_estimator, \
     make_td_opt_update_step_full_solve, make_time_evolution_step_low_sample_limit, \
     pe_e_field
+from ferminet.frequency_transforms import get_dominant_frequencies
 from ferminet.training_monitoring import wandb_login, start_wandb_run
 from ferminet.visual_tools import \
   plot_electron_histograms, plot_combined_electron_positions, plot_electron_presence_map
@@ -653,8 +654,7 @@ def optimizer_setup(
       
       optimizer = optax.chain(
         store_last_gradient(),
-        optax.scale(cfg.td.parameter_step),
-        optax.scale(-1.),)
+        optax.scale(cfg.td.parameter_step),)  # the -1j is done within the update itself
 
     else:
       optimizer = optax.chain(
@@ -681,12 +681,11 @@ def get_training_step_function(
     # optax/optax-compatible optimizer (ADAM, LAMB, ...)
     opt_state = jax.pmap(optimizer.init)(params)
 
-
     if cfg.td.time_evolution:
       n_electrons = sum(
         int(round(atom.charge)) for atom in cfg.system.molecule)
-
-      if cfg.td.full_solve:
+      
+      if cfg.td.solver == 'psuedoinverse':
         accumulate_samples, conduct_timestep = make_td_opt_update_step_full_solve(
           evaluate_loss, batch_network, cfg.td.iterations_per_timestep,
           cfg.td.regularization.ac, cfg.td.regularization.rc
@@ -695,12 +694,17 @@ def get_training_step_function(
         mcmc_step=mcmc_step, optimizer=optimizer,
         accumulate_samples=accumulate_samples, conduct_timestep=conduct_timestep,
         iterations_per_timestep=cfg.td.iterations_per_timestep,
-        n_electrons=n_electrons, burn_in_per_timestep=cfg.td.burn_in_per_timestep
+        n_electrons=n_electrons, burn_in_per_timestep=cfg.td.burn_in_per_timestep,
+        reset_if_nan=cfg.td.reset_if_nan,
+        time_integration=cfg.td.time_integration
       )
       
-      else:
+      elif cfg.td.solver == 'iterative':
+    
+        logging.info("Making iterative step for time evolution")
         accumulate_samples, conduct_timestep = make_td_opt_update_step(
-          evaluate_loss=evaluate_loss, batch_network=batch_network, damping=cfg.td.damping, iterations_per_timestep=cfg.td.iterations_per_timestep
+          evaluate_loss=evaluate_loss, batch_network=batch_network, damping=cfg.td.damping,
+          iterations_per_timestep=cfg.td.iterations_per_timestep
         )
 
         step = make_time_evolution_step(
@@ -708,28 +712,32 @@ def get_training_step_function(
         accumulate_samples=accumulate_samples, conduct_timestep=conduct_timestep,
         iterations_per_timestep=cfg.td.iterations_per_timestep,
         n_electrons=n_electrons,
-        cg_iterations=cfg.td.cg_iterations
+        cg_iterations=cfg.td.cg_iterations,
+        burn_in_per_timestep=cfg.td.burn_in_per_timestep,
+        time_integration=cfg.td.time_integration,
+        reset_if_nan=cfg.td.reset_if_nan
       )
-
-      if cfg.td.estimate_error:
-        err_step = cg_err_estimator(
-        mcmc_step=mcmc_step, optimizer=optimizer,
-        accumulate_samples=accumulate_samples, conduct_timestep=conduct_timestep,
-        iterations_per_timestep=cfg.td.iterations_per_timestep,
-        n_electrons=n_electrons,
-        cg_iterations=cg_iterations
-        )
-        step = err_step   # Needs to work in conjunction later, fine for testing
-
-
+      else:
+        raise NotImplementedError("No other solver implemented for td!")
+      """
+        if cfg.td.estimate_error:
+          err_step = cg_err_estimator(
+          mcmc_step=mcmc_step, optimizer=optimizer,
+          accumulate_samples=accumulate_samples, conduct_timestep=conduct_timestep,
+          iterations_per_timestep=cfg.td.iterations_per_timestep,
+          n_electrons=n_electrons,
+          cg_iterations=cfg.td.cg_iterations
+          )
+          step = err_step   # Needs to work in conjunction later, fine for testing
+      """
       
-    elif cfg.optim.optimizer == 'sr' and not cfg.td.time_evolution:  # For now while I'm using optax
+    if cfg.optim.optimizer == 'sr' and not cfg.td.time_evolution:  # For now while I'm using optax
       
       if not cfg.td.time_evolution:  # Be careful with this game!
         opt_state = opt_state_ckpt or opt_state  # avoid overwriting ckpted state
 
-      if opt_state_ckpt is not None and not cfg.td.time_evolution:  # Tricky for td
-        opt_state = tuple(opt_state_ckpt)
+      #if opt_state_ckpt is not None and not cfg.td.time_evolution:  # Tricky for td
+      #  opt_state = tuple(opt_state_ckpt)
       
       step = make_sr_training_step(
         mcmc_step=mcmc_step,
@@ -930,6 +938,8 @@ def conduct_pretraining_hf(
       )
   return params, data
 
+
+# TODO: Put the remaining initialization functions in another file, improve general code
 def train(
     cfg: ml_collections.ConfigDict, writer_manager=None, wandb_monitoring=True):
   """Runs training loop for QMC.
@@ -1070,8 +1080,6 @@ def train(
     mcmc_width_ckpt = None
     density_state_ckpt = None
 
-  
-
   if cfg.system.states:
     energy_matrix_file = open(
         os.path.join(ckpt_save_path, 'energy_matrix.npy'), 'ab')
@@ -1192,77 +1200,45 @@ def train(
   #return evaluate_loss, mcmc_step, sharded_key, data, params, mcmc_width, logabs_network, batch_network
   # Main training loop
   num_resets = 0  # used if reset_if_nan is true
-  rk = 0
+  r2_int = 0
   burn_in_step = make_training_step(
         mcmc_step=mcmc_step, optimizer_step=null_update)
+  mu_z_arr = []
+  E_arr = []
 
   for t in range(t_init, cfg.optim.iterations):
 
     sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
     if cfg.td.time_evolution:
       simulation_time = t - t_init
+      
+      data, params, opt_state, loss, aux_data, pmove, theta_dot, metrics = step(
+            data,
+            params,
+            opt_state,
+            simulation_time,
+            subkeys,
+            mcmc_width)
 
-      if cfg.td.estimate_error:
-          theta_dot_mean_per_iteration, theta_dot_var_per_iteration, \
-            theta_dot_arr_w_samples, theta_dot_arr_w_cg_iterations = step(
-              data,
-              params,
-              opt_state,
-              (t - t_init),  # Projecting to a forward time
-              subkeys,
-              mcmc_width
-            )
-          logging.info(jnp.mean(theta_dot_var_per_iteration))
-          logging.info(jnp.mean(theta_dot_mean_per_iteration))
-          tvmc_dict = {
-            'per_iteration_mean': theta_dot_mean_per_iteration,
-            'per_iterations_variance': theta_dot_var_per_iteration,
-            'w_samples': theta_dot_arr_w_samples,
-            'w_cg_iterations': theta_dot_arr_w_cg_iterations
-          }
 
-          dict_savepath_pickle = os.path.join(
-            ckpt_save_path, 'tvmc_dict.pkl')
-          dict_savepath_json = os.path.join(
-            ckpt_save_path, 'tvmc_dict.json')
-          with open(
-            dict_savepath_pickle, 'wb') as f:
-            pickle.dump(tvmc_dict, f)
-
-      else:
-        data, params, opt_state, loss, aux_data, pmove, theta_dot, r2, eff_rank = step(
-              data,
-              params,
-              opt_state,
-              simulation_time,
-              subkeys,
-              mcmc_width)
-        
-        if r2 is not None:
-          #logging.info(f"Integrated infidelity {r2}")
-          #logging.info(f"{eff_rank}")
-          rk += jnp.mean(r2)
-
-        try:
-          E_eff = jnp.mean(vmapped_E(data.positions[0], simulation_time))  # TODO: Make removin pmapping by pmean or something
-        except Exception as e:
-          print("Effective E field action computation failed")
-          print(e)
-          E_eff = 0.0
+      if cfg.td.field.E_max > 0:
+        E_eff = jnp.mean(vmapped_E(data.positions[0], simulation_time))  # TODO: Make removin pmapping by pmean or something
         E_total = pe_tot(simulation_time)
-       
-        # Burn in for that timestep
-        try:
-          mcmc_key, subkeys = kfac_jax.utils.p_split(sharded_key)
-          for i in range(cfg.td.burn_in_per_timestep):
-            data, params, *_ = burn_in_step(
-                data,
-                params,
-                state=None,
-                key=mcmc_key,
-                mcmc_width=mcmc_width)
-        except Exception as e:
-          print(f"MCMC burn in failed\n{e}\n")
+        metrics['E_eff'] = E_eff
+        metrics['E_total'] = E_total
+      
+      # Burn in for that timestep
+    
+      for i in range(cfg.td.burn_in_per_timestep):
+        subkeys, sharded_key = kfac_jax.utils.p_split(sharded_key)
+        data, params, *_ = burn_in_step(
+            data,
+            params,
+            state=None,
+            key=subkeys,
+            mcmc_width=mcmc_width)
+      
+      r2_int += jnp.mean(metrics['r2'])
 
     else:
       data, params, opt_state, loss, aux_data, pmove = step(
@@ -1271,6 +1247,15 @@ def train(
             opt_state,
             subkeys,
             mcmc_width)
+      
+      for i in range(cfg.td.burn_in_per_timestep):
+          subkeys, sharded_key = kfac_jax.utils.p_split(sharded_key)
+          data, params, *_ = burn_in_step(
+              data,
+              params,
+              state=None,
+              key=subkeys,
+              mcmc_width=mcmc_width)
 
     # due to pmean, loss, and pmove should be the same across
     # devices.
@@ -1310,12 +1295,16 @@ def train(
             raise e
         else:
           raise e
-        
+      
+
+    loss = jnp.real(loss).astype(float)
+    weighted_stats.variance = jnp.real(weighted_stats.variance).astype(float)
+    weighted_stats.mean = jnp.real(weighted_stats.mean).astype(float)
     # Logging
     if t % cfg.log.stats_frequency == 0:
       logging_str = ('Step %05d: '
                     '%03.4f E_h, exp. variance=%03.4f E_h^2, pmove=%0.2f')
-      logging_args = t, loss, weighted_stats.variance, pmove
+      logging_args = t - t_init, loss, weighted_stats.variance, pmove
 
       writer_kwargs = {
           'step': (t - t_init),
@@ -1324,13 +1313,6 @@ def train(
           'ewvar': np.asarray(weighted_stats.variance),
           'pmove': np.asarray(pmove),
       }
-
-      if cfg.td.time_evolution:
-        writer_kwargs['rk'] = rk
-        writer_kwargs['eff_rank'] = eff_rank
-        writer_kwargs['simulation_time'] = simulation_time
-        writer_kwargs['E_tot'] = E_total
-        writer_kwargs['E_eff'] = E_eff
 
       for key in observable_data:
         obs_data = observable_data[key]
@@ -1347,41 +1329,77 @@ def train(
           logging_str += ', <S^2>=%03.4f'
           logging_args += obs_data,
       logging.info(logging_str, *logging_args)
-      #writer.write(t, **writer_kwargs)
-
       
-      if cfg.log.wandb:
-        # wandb logging
-        metrics = {
-                "mean_energy": loss,
-                "variance": weighted_stats.variance,
-                "pmove": pmove
-            }
+      if cfg.td.time_evolution:
+        writer_kwargs['simulation_time'] = simulation_time
+        writer_kwargs['r2_int'] = jnp.real(r2_int).astype(float)
+        for metric in metrics:
+          writer_kwargs[metric] = jnp.mean(jnp.real(
+            metrics[metric]).astype(float))
 
+        # For frequency transforms
+        mu_z_arr.append(obs_data[2])
+        E_arr.append(loss)
+
+      if cfg.log.wandb:
         wandb.log(writer_kwargs)
 
     if t % cfg.log.log_frequency == 0 and cfg.log.wandb:
+      
+      if cfg.log.visual_plots:
+        # Visual data
+        batch_network_output = batch_network_pmapped(
+          params, data.positions, data.spins, data.atoms, data.charges)
+        pos = data.positions
+        prob_density = jnp.exp(batch_network_output)
+        img_array = plot_electron_histograms(
+          pos, prob_density)
+        combined_img_array = plot_electron_presence_map(pos)
 
-      # Visual data
-      batch_network_output = batch_network_pmapped(
-        params, data.positions, data.spins, data.atoms, data.charges)
-      pos = data.positions
-      prob_density = jnp.exp(batch_network_output)
-      img_array = plot_electron_histograms(
-        pos, prob_density)
-      combined_img_array = plot_electron_presence_map(pos)
+        # wandb logging
+        indv_images = wandb.Image(
+          img_array, caption=f"Epoch {t}")
+        combined_img = wandb.Image(
+          combined_img_array, caption=f"Epoch {t}")
+        metrics = {
+                "indv_plots": indv_images,
+                "full_plot": combined_img
+            }
 
-      # wandb logging
-      indv_images = wandb.Image(
-        img_array, caption=f"Epoch {t}")
-      combined_img = wandb.Image(
-        combined_img_array, caption=f"Epoch {t}")
-      metrics = {
-              "indv_plots": indv_images,
-              "full_plot": combined_img
-          }
+        wandb.log(metrics)
 
-      wandb.log(metrics)
+    if cfg.log.frequency_plots and (t - t_init) % cfg.log.frequency_log_frequency == 0:
+
+      freqs_dip, amps_dip = get_dominant_frequencies(
+        mu_z_arr, cfg.td.field.dt, k=6, use_radians=True)
+      
+      freqs_energy, amps_energy = get_dominant_frequencies(
+        E_arr, cfg.td.field.dt, k=6, use_radians=True
+      )
+
+      wandb.log({
+          "dominant_frequencies_dipole": wandb.plot.bar(
+              wandb.Table(data=[[float(a), float(f)] for a, f in zip(amps_dip, freqs_dip)],
+                          columns=["amplitude", "frequency"]),
+              "Amplitude",
+              "Frequency",
+              title="Top Dominant Frequency Components (mu_z)"
+          ),
+          "time": simulation_time
+        },
+      )
+    
+      wandb.log({
+          "dominant_frequencies_energy": wandb.plot.bar(
+              wandb.Table(data=[[float(a), float(f)] for a, f in zip(amps_energy, freqs_energy)],
+                          columns=["amplitude", "frequency"]),
+              "Amplitude",
+              "Frequency",
+              title="Top Dominant Frequency Components (local energy)"
+          ),
+          "time": simulation_time
+        },
+      )
 
     # Log data about observables too big to fit in a CSV
     if cfg.system.states:

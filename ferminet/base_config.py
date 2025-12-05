@@ -135,6 +135,9 @@ def default() -> ml_collections.ConfigDict:
           'stats_frequency': 1,  # iterations between logging of stats,
           'log_frequency': 1000,  # iterations between logging of stats
           'save_frequency': 10.0,  # minutes between saving network params
+          'frequency_log_frequency': 20.0, # Iterations between logging frequency plots if true
+          'visual_plots': False,
+          'frequency_plots': False,
           # Path to save/restore network to/from. If falsy,
           # creates a timestamped directory in the working directory.
           'save_path': '',
@@ -334,21 +337,23 @@ def default() -> ml_collections.ConfigDict:
           'excitation_type': 'ordered',
       },
       'td':{
-        'time_evolution': False,
+        'time_evolution': True,
+        'time_integration': 'euler',  # One of euler or rk2
+        'reset_if_nan': False,
         'damping': 1e-6,
         'iterations_per_timestep': 10,
         'parameter_step': 1e-3,
         'cg_iterations': 2000,
         'estimate_error': False,
-        'full_solve': True,  # Inversion using psuedoinverse and regularization
-        'burn_in_per_timestep': 2,
+        'solver': 'psuedoinverse',  # One of psuedoinverse or iterative
+        'burn_in_per_timestep': 10,
         'regularization' : {
           'ac': 1e-5,  # Minimum value for setting eigenvalue to zero
           'rc': 1e-4,  # max (ac, rc x max(eig)) From Medvidovic et al (2023)
         },
         'field' : {  # E_field parameters from Nys et al (2024)
-          'E_max': 0.06,
-          'w': 0.3,
+          'E_max': 0.03,
+          'w': 0.1,
           'dt': 0.25,
         },
       },
