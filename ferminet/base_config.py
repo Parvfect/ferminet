@@ -74,7 +74,7 @@ def default() -> ml_collections.ConfigDict:
           # If true, center the clipping window around the median rather than
           # the mean. More "correct" for removing outliers, but also potentially
           # slow, especially with multihost training.
-          'clip_median': False,
+          'clip_median': True,  # Clipping median local energy
           # If true, center the local energy differences in the gradient at the
           # average clipped energy rather than average energy, guaranteeing that
           # the average energy difference will be zero in each batch.
@@ -82,7 +82,7 @@ def default() -> ml_collections.ConfigDict:
           # If true, keep the parameters and optimizer state from the previous
           # step and revert them if they become NaN after an update. Mainly
           # useful for excited states
-          'reset_if_nan': False,
+          'reset_if_nan': True,
           # If using Wasserstein QMC, this parameter controls the amount of
           # "default" VMC gradient to mix in. Otherwise, it is ignored.
           'vmc_weight': 0.0,
@@ -281,10 +281,10 @@ def default() -> ml_collections.ConfigDict:
           # Only used if network_type is 'psiformer'.
           'psiformer': {
               # PsiFormer architecture: von Glehn, Spencer, Pfau, ICLR 2023.
-              'num_layers': 4,
-              'num_heads': 4,
-              'heads_dim': 64,
-              'mlp_hidden_dims': (256,),
+              'num_layers': 2,
+              'num_heads': 2,
+              'heads_dim': 8,
+              'mlp_hidden_dims': (24,),
               'use_layer_norm': True,
           },
           # Config common to all architectures.
@@ -337,7 +337,7 @@ def default() -> ml_collections.ConfigDict:
           'excitation_type': 'ordered',
       },
       'td':{
-        'time_evolution': True,
+        'time_evolution': False,
         'time_integration': 'euler',  # One of euler or rk2
         'reset_if_nan': False,
         'damping': 1e-6,

@@ -1414,8 +1414,8 @@ def train(
       np.save(density_matrix_file, observable_data['density'])
 
     # Checkpointing
-    if time.time() - time_of_last_ckpt > cfg.log.save_frequency * 60 \
-        and not cfg.td.time_evolution:
+    if time.time() - time_of_last_ckpt > cfg.log.save_frequency * 60:
+       # and not cfg.td.time_evolution:
       checkpoint.save(ckpt_save_path, t, data, params, opt_state, mcmc_width)
       time_of_last_ckpt = time.time()
 

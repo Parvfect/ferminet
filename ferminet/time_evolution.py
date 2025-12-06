@@ -511,14 +511,24 @@ def make_time_evolution_step_low_sample_limit(
       theta_dot = theta_dot_1
 
     logging.info("Updating params")
-    updates, opt_state = optimizer.update(
+
+    updates, new_state = optimizer.update(
       unravel_fn(theta_dot), opt_state, params)
-    params = optax.apply_updates(params, updates)
+    new_params = optax.apply_updates(
+      params, updates)
+
+    if reset_if_nan:
+      new_params = jax.lax.cond(jnp.isnan(loss),
+                                lambda: params,
+                                lambda: new_params)
+      new_state = jax.lax.cond(jnp.isnan(loss),
+                               lambda: opt_state,
+                               lambda: new_state)
 
     logging.info("Completed timestep")
 
     
-    return data, params, opt_state, \
+    return data, new_params, new_state, \
       loss, aux_data, pmove, theta_dot, metrics
 
   return step
