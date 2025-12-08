@@ -117,18 +117,18 @@ def make_td_opt_update_step_full_solve(
     _, s, vh = jnp.linalg.svd(a=fisher, hermitian=True)
 
     # Smooth cutoff - Medvidovic et al (2023)
-    #lambda2 = jnp.max(ac, rc * jnp.max(s)**2)
-    #log_ratio6 = 6.0 * (jnp.log(lambda2) - jnp.log(s + 1e-40))
-    #ratio6 = jnp.exp(jnp.clip(log_ratio6, -50, 50))   # safer exponent
-    
+    lambda2 = jnp.maximum(ac, rc * jnp.max(s)**2)
+    ratio6 = (lambda2 / (s ** 2 + 1e-40)) ** 6
+    eff_rank = 1 / (1 + ratio6)
+
     #eff_rank = jnp.sum(ratio6)
     #f = 1.0 / (1.0 + ratio6)
     #max_eig = jnp.max(s)
     #regularized_term = jnp.max(ac, max_eig**2 * rc )  # TODO: Fix tracer error
-    regularized_term = ac
+    #regularized_term = ac
 
-    eff_rank = 1/(1 + (regularized_term / s**2) ** 6)  # TODO: Replace this with max eigenvalue weighting - should bring the error down
-  
+    #eff_rank = 1/(1 + (regularized_term / s**2) ** 6)  # TODO: Replace this with max eigenvalue weighting - should bring the error down
+
     s = (1/s**2) * eff_rank  # From Medvidovic et al (2023)
 
     eff_rank = jnp.sum(eff_rank)
