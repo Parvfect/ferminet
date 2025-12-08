@@ -114,7 +114,7 @@ def make_td_opt_update_step_full_solve(
     # Centering gradients
     fisher -= jnp.mean(fisher)
 
-    _, s, vh = jnp.linalg.svd(a=fisher, hermitian=True)
+    rh, s, vh = jnp.linalg.svd(a=fisher, hermitian=True)
 
     # Smooth cutoff - Medvidovic et al (2023)
     lambda2 = jnp.maximum(ac, rc * jnp.max(s)**2)
@@ -129,11 +129,12 @@ def make_td_opt_update_step_full_solve(
 
     #eff_rank = 1/(1 + (regularized_term / s**2) ** 6)  # TODO: Replace this with max eigenvalue weighting - should bring the error down
 
+
     s = (1/s**2) * eff_rank  # From Medvidovic et al (2023)
 
     eff_rank = jnp.sum(eff_rank)
     
-    SR_inv = (vh.T * s) @ vh
+    SR_inv = (rh * s) @ vh
 
     theta_dot = SR_inv @ grad_vector
     
