@@ -129,11 +129,11 @@ def make_td_opt_update_step_full_solve(
     #regularized_term = ac
 
     #eff_rank = 1/(1 + (regularized_term / s**2) ** 6)  # TODO: Replace this with max eigenvalue weighting - should bring the error down
-    s = jnp.where(s < ac, 0, (1/s)) # From Medvidovic et al (2023)
+    s_inv = jnp.where(s < ac, 0, (1/s)) # From Medvidovic et al (2023)
 
-    eff_rank = jnp.sum(eff_rank)
+    eff_rank = jnp.sum(jnp.where(s < ac, 1, 0))
     
-    SR_inv = (rh * s) @ vh
+    SR_inv = (rh * s_inv) @ vh
 
     theta_dot = SR_inv @ grad_vector
     

@@ -348,7 +348,7 @@ def default() -> ml_collections.ConfigDict:
         'solver': 'psuedoinverse',  # One of psuedoinverse or iterative
         'burn_in_per_timestep': 10,
         'regularization' : {
-          'ac': 1e-5,  # Minimum value for setting eigenvalue to zero
+          'ac': 1e-3,  # Minimum value for setting eigenvalue to zero
           'rc': 1e-4,  # max (ac, rc x max(eig)) From Medvidovic et al (2023)
         },
         'field' : {  # E_field parameters from Nys et al (2024)
