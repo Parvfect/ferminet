@@ -668,7 +668,7 @@ def optimizer_setup(
 
 
 def get_training_step_function(
-    cfg, optimizer, mcmc_step, evaluate_loss, params, opt_state_ckpt, batch_network,
+    cfg, optimizer, mcmc_step, evaluate_loss, params, opt_state_ckpt, batch_network, batch_network_complex,
     opt_state):
   
   if not optimizer:
@@ -687,7 +687,7 @@ def get_training_step_function(
       
       if cfg.td.solver == 'psuedoinverse':
         accumulate_samples, conduct_timestep = make_td_opt_update_step_full_solve(
-          evaluate_loss, batch_network, cfg.td.iterations_per_timestep,
+          evaluate_loss, batch_network_complex, cfg.td.iterations_per_timestep,
           cfg.td.regularization.ac, cfg.td.regularization.rc
         )
         step = make_time_evolution_step_low_sample_limit(
@@ -703,7 +703,7 @@ def get_training_step_function(
     
         logging.info("Making iterative step for time evolution")
         accumulate_samples, conduct_timestep = make_td_opt_update_step(
-          evaluate_loss=evaluate_loss, batch_network=batch_network, damping=cfg.td.damping,
+          evaluate_loss=evaluate_loss, batch_network=batch_network_complex, damping=cfg.td.damping,
           iterations_per_timestep=cfg.td.iterations_per_timestep
         )
 
@@ -1019,6 +1019,9 @@ def train(
       phase, mag = signed_network(*args, **kwargs)
       return mag + 1.j * phase
     
+  batch_network_complex = jax.vmap(
+      log_network, in_axes=(None, 0, 0, 0, 0), out_axes=0
+  )
 
   if cfg.system.pyscf_mol:
     cfg.system.pyscf_mol.build()
@@ -1117,7 +1120,7 @@ def train(
     cfg, params, data, opt_state_ckpt, evaluate_loss, sharded_key)
   logging.info("Optimizer setup")
 
-  step, opt_state = get_training_step_function(cfg, optimizer, mcmc_step, evaluate_loss, params, opt_state_ckpt, batch_network, opt_state)
+  step, opt_state = get_training_step_function(cfg, optimizer, mcmc_step, evaluate_loss, params, opt_state_ckpt, batch_network, batch_network_complex, opt_state)
   logging.info("Training step created")
 
 
@@ -1183,6 +1186,7 @@ def train(
         log=False)
 
   batch_network_pmapped = constants.pmap(batch_network)
+  batch_network_complex_pmapped = constants.pmap(batch_network_complex)
   eff_pe, pe_tot = pe_e_field(
     cfg.td.field.E_max, cfg.td.field.w, cfg.td.field.dt)
   vmapped_E = jax.vmap(eff_pe, in_axes=(0, None))
@@ -1226,7 +1230,14 @@ def train(
         E_total = pe_tot(simulation_time)
         metrics['E_eff'] = E_eff
         metrics['E_total'] = E_total
-      
+
+      logprob = 2.0 * batch_network_complex_pmapped(
+        params, data.positions, data.spins, data.atoms, data.charges
+      )
+
+      arg_psi = jnp.mean(jnp.angle(logprob))
+
+      metrics['arg_psi'] = arg_psi
       # Burn in for that timestep
     
       for i in range(cfg.td.burn_in_per_timestep):

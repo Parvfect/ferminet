@@ -68,6 +68,21 @@ def make_td_opt_update_step_full_solve(
     def compute_SR_chunked(params, data, chunk_size=256):
         """Compute S = O^T O and mean(O) using chunks."""
         
+        def complex_jacobian_fast(f, params):
+          y, vjp_fun = jax.vjp(f, params)
+          y_flat, unravel_y = jax.flatten_util.ravel_pytree(y)
+          N = y_flat.size
+
+          basis = jnp.eye(N, dtype=y_flat.dtype)
+
+          def vjp_single(e):
+              dy = unravel_y(e)
+              grad_p = vjp_fun(dy)[0]
+              grad_flat, _ = jax.flatten_util.ravel_pytree(grad_p)
+              return grad_flat
+
+          return jax.vmap(vjp_single)(basis)
+        
         N = data.positions.shape[0]
         flat_params, unravel = jax.flatten_util.ravel_pytree(params)
         Np = flat_params.shape[0]
@@ -81,8 +96,17 @@ def make_td_opt_update_step_full_solve(
             atoms = data.atoms[start:end]
             charges = data.charges[start:end]
 
+            f = lambda p: batch_network(p, pos, spins, atoms, charges)
+            J_chunk = complex_jacobian_fast(f, params)
+
+            # collapse leaves, form O_chunk
+            O_chunk = J_chunk.reshape(J_chunk.shape[0], -1)
+
+            # SR update
+            S += O_chunk.T @ O_chunk
+            """
             J_chunk = jax.jacrev(
-                lambda p: batch_network(p, pos, spins, atoms, charges)
+                lambda p: batch_network(p, pos, spins, atoms,   charges)
             )(params)
 
             per_leaf = [
@@ -92,6 +116,7 @@ def make_td_opt_update_step_full_solve(
             O_chunk = jnp.concatenate(per_leaf, axis=1)
 
             S += O_chunk.T @ O_chunk
+            """
         return S
 
     S = compute_SR_chunked(
