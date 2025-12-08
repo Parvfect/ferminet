@@ -120,6 +120,7 @@ def make_td_opt_update_step_full_solve(
     lambda2 = jnp.maximum(ac, rc * jnp.max(s)**2)
     ratio6 = (lambda2 / (s ** 2 + 1e-40)) ** 6
     eff_rank = 1 / (1 + ratio6)
+    eff_rank = 1.0
 
     #eff_rank = jnp.sum(ratio6)
     #f = 1.0 / (1.0 + ratio6)
@@ -128,9 +129,7 @@ def make_td_opt_update_step_full_solve(
     #regularized_term = ac
 
     #eff_rank = 1/(1 + (regularized_term / s**2) ** 6)  # TODO: Replace this with max eigenvalue weighting - should bring the error down
-
-
-    s = (1/s**2) * eff_rank  # From Medvidovic et al (2023)
+    s = jnp.where(s < ac, 0, (1/s)) # From Medvidovic et al (2023)
 
     eff_rank = jnp.sum(eff_rank)
     
