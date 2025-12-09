@@ -1237,9 +1237,8 @@ def train(
         params, data.positions, data.spins, data.atoms, data.charges
       )
 
-      phase_psi = jnp.angle(logprob, deg=True)
-      arg_psi = jnp.angle(phase_psi, deg=True)
-      std_arg_psi = (phase_psi - arg_psi) ** 2 / phase_psi.shape[0]
+      arg_psi = jnp.mean(jnp.angle(logprob, deg=True))
+      std_arg_psi = (jnp.angle(logprob, deg=True) - arg_psi) ** 2 / logprob.shape[0]
 
       metrics['arg_psi'] = arg_psi
       metrics['std_arg_psi'] = std_arg_psi
