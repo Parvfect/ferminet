@@ -200,7 +200,7 @@ def make_td_opt_update_step(
     return loss, aux_data, grad_vector + flat_grads / iterations_per_timestep
   
   def conduct_timestep_(
-      params, key, data, grad_vector, cg_iterations, batch_size):
+      params, key, position_arr, data, grad_vector, cg_iterations, batch_size):
     """
     Solves for $XX^T theta_dot = X epsilon$
     $X epsilon$ is accumulated in the grad_vector
@@ -210,6 +210,16 @@ def make_td_opt_update_step(
 
     flat_params, unravel_fn = jax.flatten_util.ravel_pytree(params)
     n_params = flat_params.shape[0]
+
+    data = networks.FermiNetData(
+          positions=position_arr,
+          spins=jnp.repeat(
+            data.spins, repeats=iterations_per_timestep, axis=0),
+          atoms=jnp.repeat(
+            data.atoms, repeats=iterations_per_timestep, axis=0),
+          charges=jnp.repeat(
+            data.charges, repeats=iterations_per_timestep, axis=0)
+      )
   
     def f(params):
       psi = batch_network(
@@ -253,7 +263,8 @@ def make_td_opt_update_step(
       "r2": r2,
       "effective_rank": eff_rank
     }
-    
+    del data
+    del position_arr
 
     return theta_dot, metrics
   return accumulate_samples_, conduct_timestep_
@@ -306,7 +317,7 @@ def make_time_evolution_step(
     spins, atoms, charges = data.spins, data.atoms, data.charges
 
     def accumulate_samples_inner_fn(i, carry):
-      loss, aux_data, position_arr, grad_vector, key, time = carry
+      loss, aux_data, position_arr, data, grad_vector, key, time = carry
       mcmc_key, key = jax.random.split(key)
 
       positions = lax.dynamic_slice(
@@ -323,7 +334,7 @@ def make_time_evolution_step(
       )
 
       data, pmove = mcmc_step(
-        params, accumulated_data, mcmc_key, mcmc_width)  \
+        params, data, mcmc_key, mcmc_width)  \
           # TODO: Replace accumulated data with normal data here
 
       loss_key, key = jax.random.split(key)
@@ -337,7 +348,7 @@ def make_time_evolution_step(
           (batch_size * i, 0)   # (row_offset, col_offset)
       )
 
-      return loss, aux_data, position_arr, grad_vector, key, time
+      return loss, aux_data, position_arr, data, grad_vector, key, time
 
     logging.info(f"Starting sample accumulation for timestep")
 
@@ -365,24 +376,16 @@ def make_time_evolution_step(
       )
       
       init_carry = (
-        loss, aux_data, position_arr, grad_vector, key, time)
-      loss, aux_data, position_arr, final_grad_vector, key, time = lax.fori_loop(
+        loss, aux_data, position_arr, data, grad_vector, key, time)
+      loss, aux_data, position_arr, data, final_grad_vector, key, time = lax.fori_loop(
           0, iterations_per_timestep, accumulate_samples_inner_fn, init_carry
       )
 
-      data = networks.FermiNetData(
-          positions=position_arr,
-          spins=jnp.repeat(
-            data.spins, repeats=iterations_per_timestep, axis=0),
-          atoms=jnp.repeat(
-            data.atoms, repeats=iterations_per_timestep, axis=0),
-          charges=jnp.repeat(
-            data.charges, repeats=iterations_per_timestep, axis=0)
-      )
-      
       theta_dot, metrics = conduct_timestep(
-        params, key, data, final_grad_vector,
+        params, key, position_arr, data, final_grad_vector,
         cg_iterations, batch_size)
+      
+      del position_arr
       
       return data, pmove, loss, aux_data, theta_dot, metrics
       
@@ -410,7 +413,7 @@ def make_time_evolution_step(
     logging.info("Updating params")
     # Step 4: Full step update with k2
     
-    make_updates = False
+    make_updates = True
     if make_updates:
       updates, opt_state = optimizer.update(
         unravel_fn(theta_dot), opt_state, params)
