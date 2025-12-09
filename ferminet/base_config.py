@@ -340,10 +340,10 @@ def default() -> ml_collections.ConfigDict:
         'time_evolution': False,
         'time_integration': 'euler',  # One of euler or rk2
         'reset_if_nan': True,
-        'damping': 1e-6,
+        'damping': 1e-4,
         'iterations_per_timestep': 10,
         'parameter_step': 1e-3,
-        'cg_iterations': 2000,
+        'cg_iterations': 200,
         'estimate_error': False,
         'solver': 'psuedoinverse',  # One of psuedoinverse or iterative
         'burn_in_per_timestep': 10,
