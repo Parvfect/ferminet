@@ -1233,12 +1233,17 @@ def train(
         metrics['E_eff'] = E_eff
         metrics['E_total'] = E_total
 
-      logprob = 2.0 * batch_network_complex_pmapped(
+      logprob = batch_network_complex_pmapped(
         params, data.positions, data.spins, data.atoms, data.charges
       )
 
-      arg_psi = jnp.mean(jnp.angle(logprob, deg=True))
-      std_arg_psi = (jnp.angle(logprob, deg=True) - arg_psi) ** 2 / logprob.shape[0]
+      theta = jnp.imag(logprob)
+
+      # Circular mean of phase
+      arg_psi = jnp.angle(jnp.mean(jnp.exp(1j * theta)))
+
+      # Circular variance
+      std_arg_psi = 1.0 - jnp.abs(jnp.mean(jnp.exp(1j * theta)))
 
       metrics['arg_psi'] = arg_psi
       metrics['std_arg_psi'] = std_arg_psi
