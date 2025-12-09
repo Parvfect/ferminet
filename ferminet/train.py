@@ -1235,9 +1235,12 @@ def train(
         params, data.positions, data.spins, data.atoms, data.charges
       )
 
-      arg_psi = jnp.mean(jnp.angle(logprob))
+      phase_psi = jnp.imag(logprob)
+      arg_psi = jnp.mean(phase_psi)
+      std_arg_psi = (phase_psi - arg_psi) ** 2
 
       metrics['arg_psi'] = arg_psi
+      metrics['std_arg_psi'] = std_arg_psi
       # Burn in for that timestep
     
       for i in range(cfg.td.burn_in_per_timestep):
