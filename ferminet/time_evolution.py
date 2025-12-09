@@ -413,6 +413,11 @@ def make_time_evolution_step(
     logging.info("Updating params")
     # Step 4: Full step update with k2
     
+    updates, new_state = optimizer.update(
+      unravel_fn(theta_dot), opt_state, params)
+      
+    new_params = optax.apply_updates(params, updates)
+      
     if reset_if_nan:
       new_params = jax.lax.cond(jnp.isnan(loss),
                                 lambda: params,
@@ -422,6 +427,7 @@ def make_time_evolution_step(
                                lambda: new_state)
 
     logging.info("Completed timestep")
+
     
     return data, new_params, new_state, \
       loss, aux_data, pmove, theta_dot, metrics
