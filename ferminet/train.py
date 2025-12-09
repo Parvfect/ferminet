@@ -1210,7 +1210,6 @@ def train(
   mu_z_arr = []
   E_arr = []
   opt_state = optimizer.init(params)
-  print(opt_state)
 
   for t in range(t_init, cfg.optim.iterations):
 
@@ -1237,16 +1236,16 @@ def train(
         params, data.positions, data.spins, data.atoms, data.charges
       )
 
-      theta = jnp.imag(logprob)
+      psi = jnp.exp(logprob)
 
       # Circular mean of phase
-      arg_psi = jnp.angle(jnp.mean(jnp.exp(1j * theta)))
+      arg_psi = jnp.angle(jnp.mean(psi / jnp.abs(psi)))
 
       # Circular variance
-      std_arg_psi = 1.0 - jnp.abs(jnp.mean(jnp.exp(1j * theta)))
+      #std_arg_psi = 1.0 - jnp.abs(jnp.mean(jnp.exp(1j * )))
 
       metrics['arg_psi'] = arg_psi
-      metrics['std_arg_psi'] = std_arg_psi
+      #metrics['std_arg_psi'] = std_arg_psi
       
       # Burn in for that timestep
       for i in range(cfg.td.burn_in_per_timestep):
