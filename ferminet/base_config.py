@@ -339,7 +339,7 @@ def default() -> ml_collections.ConfigDict:
       'td':{
         'time_evolution': False,
         'time_integration': 'euler',  # One of euler or rk2
-        'reset_if_nan': False,
+        'reset_if_nan': True,
         'damping': 1e-4,
         'iterations_per_timestep': 10,
         'parameter_step': 1e-3,

@@ -424,10 +424,12 @@ def make_time_evolution_step(
                                 lambda _: params,
                                 lambda _: new_params,
                                 operand=None)
+      """            
       new_state = jax.lax.cond(jnp.isnan(loss),
                                lambda _: opt_state,
                                lambda _: new_state,
                                operand=None)
+      """
     logging.info("Completed timestep")
 
     
@@ -557,10 +559,12 @@ def make_time_evolution_step_low_sample_limit(
                                 lambda _: params,
                                 lambda _: new_params,
                                 operand=None)
+      """
       new_state = jax.lax.cond(jnp.isnan(loss),
                                lambda _: opt_state,
                                lambda _: new_state,
                                operand=None)
+      """
 
     logging.info("Completed timestep")
 
