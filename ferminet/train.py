@@ -1209,6 +1209,8 @@ def train(
         mcmc_step=mcmc_step, optimizer_step=null_update)
   mu_z_arr = []
   E_arr = []
+  opt_state = optimizer.init(params)
+  print(opt_state)
 
   for t in range(t_init, cfg.optim.iterations):
 
@@ -1235,16 +1237,16 @@ def train(
         params, data.positions, data.spins, data.atoms, data.charges
       )
 
-      phase_psi = jnp.imag(logprob)
-      arg_psi = jnp.mean(phase_psi)
-      std_arg_psi = (phase_psi - arg_psi) ** 2
+      phase_psi = jnp.angle(logprob, deg=True)
+      arg_psi = jnp.angle(phase_psi, deg=True)
+      std_arg_psi = (phase_psi - arg_psi) ** 2 / phase_psi.shape[0]
 
       metrics['arg_psi'] = arg_psi
       metrics['std_arg_psi'] = std_arg_psi
+      
       # Burn in for that timestep
-    
       for i in range(cfg.td.burn_in_per_timestep):
-        subkeys, sharded_key = kfac_jax.utils.p_split(sharded_key)
+        sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
         data, params, *_ = burn_in_step(
             data,
             params,
@@ -1261,15 +1263,6 @@ def train(
             opt_state,
             subkeys,
             mcmc_width)
-      
-      for i in range(cfg.td.burn_in_per_timestep):
-          subkeys, sharded_key = kfac_jax.utils.p_split(sharded_key)
-          data, params, *_ = burn_in_step(
-              data,
-              params,
-              state=None,
-              key=subkeys,
-              mcmc_width=mcmc_width)
 
     # due to pmean, loss, and pmove should be the same across
     # devices.
@@ -1310,8 +1303,8 @@ def train(
         else:
           raise e
       
-
-    loss = jnp.real(loss).astype(float)
+    if jnp.iscomplex(loss):  # Not sure if we are meant to take real or complex part here
+      loss = jnp.abs(loss)
     weighted_stats.variance = jnp.real(weighted_stats.variance).astype(float)
     weighted_stats.mean = jnp.real(weighted_stats.mean).astype(float)
     # Logging

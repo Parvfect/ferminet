@@ -297,7 +297,7 @@ def make_time_evolution_step(
   def step(
     data: networks.FermiNetData,
     params: networks.ParamTree,
-    opt_state: Optional[optax.OptState],
+    opt_state: optax.OptState,
     time: float,
     key: chex.PRNGKey,
     mcmc_width: jnp.ndarray,
@@ -414,18 +414,20 @@ def make_time_evolution_step(
     # Step 4: Full step update with k2
     
     updates, new_state = optimizer.update(
-      unravel_fn(theta_dot), opt_state, params)
+      theta_dot, opt_state, params)
       
-    new_params = optax.apply_updates(params, updates)
-      
+    new_params = optax.apply_updates(
+      params, unravel_fn(updates))
+
     if reset_if_nan:
       new_params = jax.lax.cond(jnp.isnan(loss),
-                                lambda: params,
-                                lambda: new_params)
+                                lambda _: params,
+                                lambda _: new_params,
+                                operand=None)
       new_state = jax.lax.cond(jnp.isnan(loss),
-                               lambda: opt_state,
-                               lambda: new_state)
-
+                               lambda _: opt_state,
+                               lambda _: new_state,
+                               operand=None)
     logging.info("Completed timestep")
 
     
@@ -461,7 +463,7 @@ def make_time_evolution_step_low_sample_limit(
   def step(
     data: networks.FermiNetData,
     params: networks.ParamTree,
-    opt_state: Optional[optax.OptState],
+    opt_state: optax.OptState,
     time: float,
     key: chex.PRNGKey,
     mcmc_width: jnp.ndarray
@@ -543,17 +545,22 @@ def make_time_evolution_step_low_sample_limit(
     logging.info("Updating params")
 
     updates, new_state = optimizer.update(
-      unravel_fn(theta_dot), opt_state, params)
+      theta_dot, opt_state, params)
     new_params = optax.apply_updates(
-      params, updates)
+      params, unravel_fn(updates))
+    
+    if not opt_state:
+      opt_state = {}
 
     if reset_if_nan:
       new_params = jax.lax.cond(jnp.isnan(loss),
-                                lambda: params,
-                                lambda: new_params)
+                                lambda _: params,
+                                lambda _: new_params,
+                                operand=None)
       new_state = jax.lax.cond(jnp.isnan(loss),
-                               lambda: opt_state,
-                               lambda: new_state)
+                               lambda _: opt_state,
+                               lambda _: new_state,
+                               operand=None)
 
     logging.info("Completed timestep")
 
