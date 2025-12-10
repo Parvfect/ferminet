@@ -353,7 +353,7 @@ def default() -> ml_collections.ConfigDict:
         },
         'field' : {  # E_field parameters from Nys et al (2024)
           'E_max': 0.03,
-          'w': 0.1,
+          'w': 0.375,
           'dt': 0.25,
         },
       },

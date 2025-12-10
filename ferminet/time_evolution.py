@@ -32,16 +32,16 @@ def pe_e_field(E_max, w, dt):
   
   def eff_pe(pos, t):
     eff_time = t * dt
-    w2 = get_envelope_constant_field(eff_time)
+    w2 = get_envelope(eff_time)
     return - sum([
-    E_max * w2 * jnp.dot(
+    E_max * jnp.sin(w * eff_time) * w2 * jnp.dot(
       E_vec, pos[k: k + 3]) for k in range(
-      0, pos.shape[0], 3)])  # jnp.sin(w * eff_time)
+      0, pos.shape[0], 3)])
 
   def pe_tot(t):
     eff_time = t * dt
-    w2 = get_envelope_constant_field(eff_time)
-    return E_max * w2  # * jnp.sin(w * eff_time)
+    w2 = get_envelope(eff_time)
+    return E_max * w2 * jnp.sin(w * eff_time)
   
   return eff_pe, pe_tot
 
@@ -142,7 +142,7 @@ def make_td_opt_update_step_full_solve(
     n_params = flat_params.shape[0]
 
     # Centering gradients
-    fisher -= jnp.mean(fisher)
+    #fisher -= jnp.mean(fisher)
 
     rh, s, vh = jnp.linalg.svd(a=fisher, hermitian=True)
 

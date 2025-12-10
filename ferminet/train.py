@@ -1209,7 +1209,6 @@ def train(
         mcmc_step=mcmc_step, optimizer_step=null_update)
   mu_z_arr = []
   E_arr = []
-  opt_state = optimizer.init(params)
 
   for t in range(t_init, cfg.optim.iterations):
 
