@@ -1235,14 +1235,15 @@ def train(
       logprob = batch_network_complex_pmapped(
         params, data.positions, data.spins, data.atoms, data.charges
       )
-
       psi = jnp.exp(logprob)
 
       # Circular mean of phase
-      arg_psi = jnp.angle(jnp.mean(psi / jnp.abs(psi)))
+      arg_psi = jnp.angle(psi)[0][0]
+      #arg_psi = jnp.angle(jnp.mean(psi / jnp.abs(psi)))
+      print(arg_psi)
 
       # Circular variance
-      #std_arg_psi = 1.0 - jnp.abs(jnp.mean(jnp.exp(1j * )))
+      #std_arg_psi = 1.0 -  jnp.abs(jnp.mean(jnp.exp(1j * )))
 
       metrics['arg_psi'] = arg_psi
       #metrics['std_arg_psi'] = std_arg_psi

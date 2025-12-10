@@ -273,14 +273,19 @@ def potential_electric_field(pos: Array, t, E_max, w, dt):
             t < 3 * T, 3 - t/T, jnp.where(
               t >= 3 * T, 0, 0 
             ))))
+  def get_envelope_constant_field(t):
+    T = 2 * 3.14 / (w)
+    return jnp.where(
+      t<T, t/T, 1.0
+    )
   
   E_vec = jnp.array([0.0, 0.0, 1.0]) # Unit vector along z direction
   eff_time = dt * t # Doing dt - t controlled in outer loop
-  w2 = get_envelope(eff_time)
+  w2 = get_envelope_constant_field(eff_time)
 
   return - sum([
-    E_max * jnp.sin(w * eff_time) * w2 * jnp.dot(E_vec, pos[k: k + 3]) for k in range(
-      0, pos.shape[0], 3)])
+    E_max * w2 * jnp.dot(E_vec, pos[k: k + 3]) for k in range(
+      0, pos.shape[0], 3)]) # * jnp.sin(w * eff_time)
 
 
 def potential_electron_electron(r_ee: Array) -> jnp.ndarray:
