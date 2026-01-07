@@ -42,9 +42,10 @@ from ferminet.utils import writers
 from ferminet.stochastic_reconfiguration import \
   make_sr_opt_update_step, make_sr_training_step
 from ferminet.time_evolution import \
-    make_td_opt_update_step, make_time_evolution_step, cg_err_estimator, \
-    make_td_opt_update_step_full_solve, make_time_evolution_step_low_sample_limit, \
-    pe_e_field
+  make_td_opt_update_step, make_time_evolution_step, cg_err_estimator, \
+  pe_e_field
+from ferminet.time_evolution_low_sample_limit import make_td_opt_update_step_full_solve, \
+  make_time_evolution_step_low_sample_limit
 from ferminet.frequency_transforms import get_dominant_frequencies
 from ferminet.training_monitoring import wandb_login, start_wandb_run
 from ferminet.visual_tools import \
@@ -988,6 +989,7 @@ def train(
   
   
   use_complex = cfg.network.get('complex', False)
+  print(use_complex)
   log_network_for_loss = None
   # Exclusively when computing the gradient wrt the energy for complex
   # wavefunctions, it is necessary to have log(psi) rather than log(|psi|).
@@ -1198,6 +1200,28 @@ def train(
       params)
   n_params = flat_params.shape[0]
   logging.info(f"Number of parameters is: {n_params}")
+  flat_params, unravel_fn = jax.flatten_util.ravel_pytree(params)
+
+  """
+  ### Testing block
+  print("Dtype of batch network is -")
+  print(batch_network_complex_pmapped(
+    params, data.positions, data.spins, data.atoms, data.charges).dtype)
+  
+  def param_network(params):
+    return batch_network_complex_pmapped(
+      params, data.positions, data.spins, data.atoms, data.charges)
+  
+  jac_complex = jax.jacfwd(param_network)(params)
+  print("Dtype jacobian {jac_complex.dtype}")
+  #print("Local energy")
+  #evaluate_loss_pmap = jax.pmap(evaluate_loss)
+  #loc_energy = evaluate_loss_pmap(params, jax.random.key(0), data)
+  #print(loc_energy.dtype)
+  #print(loc_energy)
+  """
+
+
 
 
   #with writer_manager as writer:
@@ -1231,16 +1255,30 @@ def train(
         metrics['E_eff'] = E_eff
         metrics['E_total'] = E_total
 
+        grad_vector = metrics['grad_vector']
+        eigs = metrics['eigenvalues']
+        
+        display_eigenvalue_gv=False
+        if display_eigenvalue_gv:  
+          print(
+            f"Eigenvalue dtypes {eigs.dtype} and elements {eigs}"
+          )
+          print(
+            f"Grad vector type is {metrics['grad_vector'].dtype} and elements are {metrics['grad_vector']}")
+
+        print(metrics['grad_vector'])
+        print(metrics['theta_dot'])
+          
       logprob = batch_network_complex_pmapped(
         params, data.positions, data.spins, data.atoms, data.charges
       )
+
       psi = jnp.exp(logprob)
 
       # Circular mean of phase
       arg_psi = jnp.angle(psi)[0][0]
       #arg_psi = jnp.angle(jnp.mean(psi / jnp.abs(psi)))
-      print(arg_psi)
-
+    
       # Circular variance
       #std_arg_psi = 1.0 -  jnp.abs(jnp.mean(jnp.exp(1j * )))
 
