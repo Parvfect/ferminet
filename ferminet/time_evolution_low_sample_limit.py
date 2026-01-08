@@ -194,32 +194,50 @@ def make_td_opt_update_step_full_solve(
     
     Ns = O.shape[1]
     O_alpha = jnp.mean(O, axis=1)  # Per parameter mean over samples
-    O = O - jnp.expand_dims(O_alpha, axis=1).repeat(Ns, axis=1) # Centering O
-    O_fisher = O / jnp.sqrt(Ns)
-    fisher = O_fisher @ jnp.conjugate(O_fisher).T  # Okay this probably makes it real, that's fine
+    O_centered = O - jnp.expand_dims(O_alpha, axis=1).repeat(Ns, axis=1) # Centering O
+    #O_fisher = O / jnp.sqrt(Ns)
+    fisher = (O_centered / jnp.sqrt(Ns)) @ jnp.conjugate(O / jnp.sqrt(Ns)).T
+    #fisher = O_fisher @ jnp.conjugate(O_fisher).T  # Okay this probably makes it real, that's fine
+    print(fisher.dtype)
 
-    print(O.shape)
+    #print(O.shape)
     correction_term = O @ jnp.reshape(psis, (Ns, 1))
-    print(correction_term.shape)
+    #print(correction_term.shape)
     fisher_correction = correction_term @ correction_term.T
     grad_vector_correction = 1j * (correction_term) * jnp.mean(local_energies)
-    print(grad_vector_correction.shape)
-    print(fisher_correction.shape)
+    #print(grad_vector_correction.shape)
+    #print(fisher_correction.shape)
 
-    fisher += fisher_correction
-
-
-
+    #fisher += fisher_correction
 
     SR_inv, eff_rank, eigs = invert_and_regularize_fisher(fisher)
-    grad_vector = (jnp.conjugate(O) @ jnp.reshape(local_energies, (
+    local_energy_mean = jnp.mean(local_energies)
+    locs_centered = local_energies - local_energy_mean
+    grad_vector = (jnp.conjugate(O) @ jnp.reshape(locs_centered, (
       Ns, 1)))
     
-    grad_vector = 2 * grad_vector / Ns
-    grad_vector += grad_vector_correction
-    print(grad_vector.dtype)
+    grad_vector = grad_vector / Ns
+    #grad_vector += grad_vector_correction
+    print(grad_vector.shape)
+    #print(grad_vector.dtype)
 
-    theta_dot = SR_inv @ jnp.imag(grad_vector)  # Real param evolution
+
+    """ Debugging
+    1. Force vector is stable without corrections (can check ground state estimation)
+    2. Checking the added preconditioner and its stability
+    3. Check dynamics (still not clear) without correction - - okay I was adding the correction to the fisher which was messing it up, let's see without it, should be stable since we are regularizing pretty strongly
+
+    !!!! Without correction dipole movement observed!!! Something works. Try rk2 later, but first figure out the distinction between the different variational principles
+    and what applies when. Test on finite systems. That's a closed task that has significant meaning.
+
+    4. Need better regularizer for S matrix 
+    5. Check corrective terms - isolate force vector first
+    6. Test ground state estimation
+
+    """
+
+    theta_dot = jnp.real(SR_inv @ grad_vector)  # Real param evolution
+    #theta_dot = grad_vector
     theta_dot = theta_dot.reshape(Np,)
     
     A = jnp.conjugate(theta_dot) @ fisher @ theta_dot  # Fisher part of residual
@@ -236,7 +254,9 @@ def make_td_opt_update_step_full_solve(
       "r2": r2,
       "effective_rank": eff_rank,
       "grad_vector": grad_vector,
-      "eigenvalues": eigs
+      "eigenvalues": eigs,
+      "energies": local_energies,
+      "energies_mean": jnp.mean(local_energies)
     }
 
     return theta_dot, metrics

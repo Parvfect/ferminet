@@ -1248,26 +1248,27 @@ def train(
             subkeys,
             mcmc_width)
 
-
+      print("Grad vector \n\n")
+      print(metrics['grad_vector'])
+      print()
+      print("Theta dot \n\n")
+      print(metrics['theta_dot'])
+      print()
+      print("Energies mean\n\n")
+      print(metrics['energies_mean'])
+      print()
+      print("Energies \n\n")
+      eigs = metrics['eigenvalues']
+      print(
+            f"Eigenvalue dtypes {eigs.dtype} and elements {eigs}"
+          )
+      print(metrics['energies'])
       if cfg.td.field.E_max > 0:
         E_eff = jnp.mean(vmapped_E(data.positions[0], simulation_time))  # TODO: Make removin pmapping by pmean or something
         E_total = pe_tot(simulation_time)
         metrics['E_eff'] = E_eff
         metrics['E_total'] = E_total
 
-        grad_vector = metrics['grad_vector']
-        eigs = metrics['eigenvalues']
-        
-        display_eigenvalue_gv=False
-        if display_eigenvalue_gv:  
-          print(
-            f"Eigenvalue dtypes {eigs.dtype} and elements {eigs}"
-          )
-          print(
-            f"Grad vector type is {metrics['grad_vector'].dtype} and elements are {metrics['grad_vector']}")
-
-        print(metrics['grad_vector'])
-        print(metrics['theta_dot'])
           
       logprob = batch_network_complex_pmapped(
         params, data.positions, data.spins, data.atoms, data.charges
