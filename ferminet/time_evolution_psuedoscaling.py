@@ -9,7 +9,7 @@ from typing import Optional, Mapping, Sequence, Tuple, Union
 from ferminet import networks
 from ferminet import constants
 
-
+# Doing it with jvps and scaling
 
 def make_td_opt_update_step_full_solve(
     evaluate_loss, batch_network,
