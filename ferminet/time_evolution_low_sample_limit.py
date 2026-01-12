@@ -374,11 +374,15 @@ def make_time_evolution_step_low_sample_limit(
       theta_dot = theta_dot_1
 
     logging.info("Updating params")
+    
+    r2 = metrics['r2']
 
-    updates, new_state = optimizer.update(
-      theta_dot, opt_state, params)
-    new_params = optax.apply_updates(
-      params, unravel_fn(updates))
+
+    if not jnp.mean(r2) > 0.5:  # Can we catch this -- implement jitted version
+      updates, new_state = optimizer.update(
+        theta_dot, opt_state, params)
+      new_params = optax.apply_updates(
+        params, unravel_fn(updates))
     
     if not opt_state:
       opt_state = {}

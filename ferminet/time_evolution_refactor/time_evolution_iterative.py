@@ -26,11 +26,13 @@ def pe_e_field(E_max, w, dt):
           ))))
   
   def get_envelope_constant_field(t):
-    return 1.0
+    return jnp.where(
+      t<T, t/T, 1.0
+    )
   
   def eff_pe(pos, t):
     eff_time = t * dt
-    w2 = get_envelope_constant_field(eff_time)
+    w2 = get_envelope(eff_time)
     return - sum([
     E_max * jnp.sin(w * eff_time) * w2 * jnp.dot(
       E_vec, pos[k: k + 3]) for k in range(
@@ -38,7 +40,7 @@ def pe_e_field(E_max, w, dt):
 
   def pe_tot(t):
     eff_time = t * dt
-    w2 = get_envelope_constant_field(eff_time)
+    w2 = get_envelope(eff_time)
     return E_max * w2 * jnp.sin(w * eff_time)
   
   return eff_pe, pe_tot

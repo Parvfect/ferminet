@@ -78,7 +78,7 @@ def molecule(cfg):
     raise RuntimeError(
         'Cannot set the number of electrons for a fractional charge atom.')
   electrons = sum(int(round(atom.charge)) for atom in cfg.system.molecule)
-
+  
   if not cfg.system.electrons:
     if cfg.system.molecule_name in SPIN_POLARISATION:
       spin = SPIN_POLARISATION[cfg.system.molecule_name]
