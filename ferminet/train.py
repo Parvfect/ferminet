@@ -1248,6 +1248,7 @@ def train(
             subkeys,
             mcmc_width)
 
+      """
       print("Grad vector \n\n")
       print(metrics['grad_vector'])
       print()
@@ -1263,6 +1264,8 @@ def train(
             f"Eigenvalue dtypes {eigs.dtype} and elements {eigs}"
           )
       print(metrics['energies'])
+      """
+      
       if cfg.td.field.E_max > 0:
         E_eff = jnp.mean(vmapped_E(data.positions[0], simulation_time))  # TODO: Make removin pmapping by pmean or something
         E_total = pe_tot(simulation_time)
