@@ -12,7 +12,7 @@ from ferminet import constants
 
 
 
-def make_td_opt_update_step(
+def make_td_opt_update_step_full_solve(
     evaluate_loss, batch_network, 
     iterations_per_timestep=10, ac=1e-5, rc=1e-4):
   """Helper functions for td simulation - see make_time_evolution_step"""
@@ -26,7 +26,6 @@ def make_td_opt_update_step(
     """Accumulates samples for right side of the equation $X epsilon$"""
 
     (loss, aux_data), grad = loss_and_grad(params, key, data, time)
-    flat_grads, unravel_fn = jax.flatten_util.ravel_pytree(grad)
     energies = aux_data.local_energy
     batch_size = energies.shape[0]
 
@@ -42,8 +41,11 @@ def make_td_opt_update_step(
       params, key, position_arr, data, local_energies):
 
     flat_params, unravel_fn = jax.flatten_util.ravel_pytree(params)
-    n_params = flat_params.shape[0]
+    
+    Np = flat_params.shape[0]
+    Ns = position_arr.shape[0]
 
+    """
     data = networks.FermiNetData(
           positions=position_arr,
           spins=jnp.repeat(
@@ -52,17 +54,50 @@ def make_td_opt_update_step(
             data.atoms, repeats=iterations_per_timestep, axis=0),
           charges=jnp.repeat(
             data.charges, repeats=iterations_per_timestep, axis=0)
-      )
-  
-    def f(params):
-      psi = batch_network(
-        params, data.positions, data.spins, data.atoms, data.charges)
-      return psi
+      )  # Might be a better way to do this
+    """
     
-    build_O = jax.vmap(lambda s: jax.jvp(f, (params,), (s,)))
-    O = build_O(jnp.eye(params.shape[0])).T  # This is Np x Ns
+    O_means = jnp.zeros(Np, dtype=complex)
+    grad_vector = jnp.zeros(Np, dtype=complex)
+    F = jnp.zeros((Np, Np), dtype=complex)
+
+    local_energies_centered = local_energies - jnp.mean(local_energies)
+
+    #build_O = jax.vmap(lambda s: jax.jvp(f, (params,), (unravel_fn(s),))[1])
+
+    chunk_size = 512
+    n_iterations = int(position_arr.shape[0] / chunk_size)  # Assuming this is generally divisible by 512, otherwise there will be annoying cases
+
+    # Building Fisher and grads in chunks
+    for i in range(n_iterations):
+
+      def f(params):
+        psi = batch_network(
+        params, lax.dynamic_slice(position_arr, (i * chunk_size, position_arr.shape[1]), (chunk_size, position_arr.shape[1])),
+        data.spins, data.atoms, data.charges)
+        return psi
+      
+      build_O = jax.vmap(lambda s: jax.jvp(f, (params,), (unravel_fn(s),))[1])
+
+      O_s = build_O(jnp.eye(Np))  # You get Np x Ns O here
+
+      F += O_s @ O_s.T
+      grad_vector += O_s @ lax.dynamic_slice(
+          local_energies_centered,
+          (i * chunk_size,),
+          (chunk_size,)
+          )
+      O_means += jnp.sum(O_s, axis=1)
+      
+
+    fisher = (F - O_means) / Ns
+    grad_vector /= Ns
+
     
-    
+    #O = build_O(jnp.eye(flat_params.shape[0]))  # This is Np x Ns
+
+    #O = jax.jacfwd(f)(flat_params).T
+
     # Create a regularization function here
     def invert_and_regularize_fisher(fisher):
       rh, s, vh = jnp.linalg.svd(a=fisher, hermitian=True)
@@ -88,15 +123,10 @@ def make_td_opt_update_step(
       return SR_inv, eff_rank, s
 
     
-    flat_params, unravel_fn = jax.flatten_util.ravel_pytree(params)
-    Np = flat_params.shape[0]
-
-    
-    Ns = O.shape[1]
-    O_alpha = jnp.mean(O, axis=1)  # Per parameter mean over samples
-    O_centered = O - jnp.expand_dims(O_alpha, axis=1).repeat(Ns, axis=1) # Centering O
+    #O_alpha = jnp.mean(O, axis=1)  # Per parameter mean over samples
+    #O_centered = O - jnp.expand_dims#(O_alpha, axis=1).repeat(Ns, axis=1) # Centering O
     #O_fisher = O / jnp.sqrt(Ns)
-    fisher = (O_centered / jnp.sqrt(Ns)) @ jnp.conjugate(O / jnp.sqrt(Ns)).T
+    #fisher = (O - jnp.mean(O, axis=1, keepdims=True) / jnp.sqrt(Ns)) @ jnp.conjugate(O / jnp.sqrt(Ns)).T
     #fisher = O_fisher @ jnp.conjugate(O_fisher).T  # Okay this probably makes it real, that's fine
 
     #### Corrections ####
@@ -105,14 +135,15 @@ def make_td_opt_update_step(
     #grad_vector_correction = 1j * (correction_term) * jnp.mean(local_energies)
     ### Ending corrections
 
+    #local_energy_mean = jnp.mean(local_energies)
+    #locs_centered = local_energies - local_energy_mean
+    #grad_vector = (jnp.conjugate(O) @ jnp.reshape(locs_centered, (
+    #  Ns, 1)))
+    
+    #grad_vector = grad_vector / Ns
 
     SR_inv, eff_rank, eigs = invert_and_regularize_fisher(fisher)
-    local_energy_mean = jnp.mean(local_energies)
-    locs_centered = local_energies - local_energy_mean
-    grad_vector = (jnp.conjugate(O) @ jnp.reshape(locs_centered, (
-      Ns, 1)))
-    
-    grad_vector = grad_vector / Ns
+   
     #grad_vector += grad_vector_correction
     #print(grad_vector.dtype)
 
@@ -144,7 +175,7 @@ def make_td_opt_update_step(
 
 
 
-def make_time_evolution_step(
+def make_time_evolution_step_low_sample_limit(
     mcmc_step,
     optimizer,
     accumulate_samples,
@@ -224,9 +255,9 @@ def make_time_evolution_step(
 
     logging.info(f"Starting sample accumulation for timestep")
 
-    def rk2_inner_fn(params, key, data, time):  # TODO: Make the general function iterative method specific
+    def rk2_inner_fn(params, key, data, time):
       
-      local_energies = jnp.zeros(iterations_per_timestep * batch_size, dtype=jnp.complex)
+      local_energies = jnp.zeros(iterations_per_timestep * batch_size, dtype=complex)
 
       position_arr = jnp.zeros(
         (iterations_per_timestep * batch_size, n_electrons*3)
@@ -240,7 +271,7 @@ def make_time_evolution_step(
       loss_key, key = jax.random.split(key)
       
       loss, aux_data, local_energies = accumulate_samples(
-        params, loss_key, data, time, local_energies)
+        params, loss_key, data, time, local_energies, 0)
       
       position_arr = lax.dynamic_update_slice(
           position_arr,
@@ -306,209 +337,4 @@ def make_time_evolution_step(
       loss, aux_data, pmove, theta_dot, metrics
 
 
-  return step
-
-
-
-
-def cg_err_estimator(
-    mcmc_step, optimizer, accumulate_samples, conduct_timestep, iterations_per_timestep, n_electrons,
-    cg_iterations):
-    # The same timestep - does 10 CG steps and calculates variance in the update vector and in the loss grads
-    # Then changes the samples accumulated per timestep and does the same again
-    # Then changes the max iterations and does it again
-
-    # We don't actually get the inverse matrice we get the solved vector (N_p), so we have to test on that instead
-    # Check scale of loss grads changing and then that should give us an idea of the scale of the variance of the estimated inverse of the metric
-    
-    # Variance per iteration (200 v 2000 v 20000) - 10 iterations
-    # Mean value for each (1e2, 1e3, 1e4)
-    # Variance for different samples accumulated (5e3, 5e4, 5e5)
-  @functools.partial(constants.pmap,
-                      in_axes=(0, 0, 0, None, 0, 0),
-                      donate_argnums=(0, 1, 2))
-  def step(
-    data: networks.FermiNetData,
-    params: networks.ParamTree,
-    opt_state: Optional[optax.OptState],
-    time: float,
-    key: chex.PRNGKey,
-    mcmc_width: jnp.ndarray,
-    time_integration_method = 'rk2'
-  ):
-    # MCMC loop
-
-    batch_size = data.positions.shape[0]
-    mcmc_key, loss_key = jax.random.split(key, num=2)
-    flat_params, unravel_fn = jax.flatten_util.ravel_pytree(
-      params)
-    n_params = flat_params.shape[0]
-    spins, atoms, charges = data.spins, data.atoms, data.charges
-
-    def accumulate_samples_inner_fn(i, carry):
-      position_arr, grad_vector, key, time = carry
-      mcmc_key, loss_key = jax.random.split(key)
-
-      positions = lax.dynamic_slice(
-          position_arr,
-          (i * batch_size, 0),           # start index (row_offset, col_offset)
-          (batch_size, position_arr.shape[1])   # slice shape
-      )
-
-      accumulated_data = networks.FermiNetData(
-          positions=positions,
-          spins=spins,
-          atoms=atoms,
-          charges=charges,
-      )
-
-      data, pmove = mcmc_step(
-        params, accumulated_data, mcmc_key, mcmc_width)
-      
-      _, _, grad_vector = accumulate_samples(
-        params, key, data, time, grad_vector)
-      
-      position_arr = lax.dynamic_update_slice(
-          position_arr,
-          data.positions,
-          (batch_size * i, 0)   # (row_offset, col_offset)
-      )
-
-      return position_arr, grad_vector, key, time
-
-    
-    def timestep_variance_inner(i, carry):
-      ## Variance of gradient update at time t with fixed data - consistency of inverse
-      data, grad_vector, theta_dot_arr, timestep_arr, key, time = carry
-      theta_dot = conduct_timestep(
-        params, key, data, grad_vector, cg_iterations)
-      
-      theta_dot_arr = lax.dynamic_update_index_in_dim(
-        theta_dot_arr,
-        theta_dot,
-        i,
-        axis=0
-      )
-
-      return data, grad_vector, theta_dot_arr, timestep_arr, key, time
-    
-    def sample_variance_inner(i, carry):
-      ## Variance of gradient update at time t with fixed data - consistency of inverse
-      data, grad_vector, theta_dot_arr, samples_arr, key, time = carry
-
-      n_samples = samples_arr[i]
-      
-      data = networks.FermiNetData(
-          positions=data.positions.sample(n_samples),
-          spins=data.spins[:n_samples, :],
-          atoms=data.atoms[:n_samples, :],
-          charges=data.charges[:n_samples, :]
-      )
-
-      theta_dot = conduct_timestep(
-        params, key, data, grad_vector, cg_iterations)
-      
-      theta_dot_arr = lax.dynamic_update_index_in_dim(
-        theta_dot_arr,
-        theta_dot,
-        i,
-        axis=0
-      )
-
-      return data, grad_vector, theta_dot_arr, samples_arr, key, time
-    
-    def cg_variance_inner(i, carry):
-      ## Variance of gradient update at time t with fixed data - consistency of inverse
-      data, grad_vector, theta_dot_arr, cg_iterations_arr, key, time = carry
-
-      cg_iterations = cg_iterations_arr[i]
-
-      theta_dot = conduct_timestep(
-        params, key, data, grad_vector, cg_iterations)
-      
-      theta_dot_arr = lax.dynamic_update_index_in_dim(
-        theta_dot_arr,
-        theta_dot,
-        i,
-        axis=0
-      )
-
-      return data, grad_vector, theta_dot_arr, cg_iterations_arr, key, time
-
-
-    def get_per_timestep_metric(
-        params, key, data, time, inner_fn, passed_arr):
-
-      grad_vector = jnp.zeros(
-        (n_params))
-      position_arr = jnp.zeros(
-        (iterations_per_timestep * batch_size, n_electrons*3)
-      )
-
-      data, pmove = mcmc_step(
-        params, data, mcmc_key, mcmc_width)
-      
-      position_arr = lax.dynamic_update_slice(
-          position_arr,
-          data.positions,
-          (batch_size, 0)
-      )
-      
-      init_carry = (position_arr, grad_vector, key, time)
-      position_arr, final_grad_vector, final_key, time = lax.fori_loop(
-          0, iterations_per_timestep, accumulate_samples_inner_fn, init_carry
-      )
-
-      # Full positions, final grad vector
-      data = networks.FermiNetData(
-          positions=position_arr,
-          spins=jnp.repeat(
-            data.spins, repeats=iterations_per_timestep, axis=0),
-          atoms=jnp.repeat(
-            data.atoms, repeats=iterations_per_timestep, axis=0),
-          charges=jnp.repeat(
-            data.charges, repeats=iterations_per_timestep, axis=0)
-      )
-       
-      per_timestep_iterations = passed_arr.shape[0]
-      # That's for iterations_per_timestep samples
-      theta_dot_arr = jnp.zeros(
-        (per_timestep_iterations, n_params))
-      init_carry = (
-        data, grad_vector, theta_dot_arr, passed_arr, key, time)
-
-      data, grad_vector, theta_dot_arr, passed_arr, key, time = lax.fori_loop(
-        0, per_timestep_iterations, inner_fn, init_carry)
-      
-      
-      return theta_dot_arr
-
-
-    n_iterations_arr = jnp.zeros(10)
-    samples_arr = jnp.array([1e3, 5e3, 1e4, 5e4, 1e5, 5e5])
-    cg_iterations_arr = jnp.array([1e2, 1e3, 1e4, 5e4, 1e5])
-
-    logging.info("Running per timestep variance")
-    theta_dot_arr_per_iteration = get_per_timestep_metric(
-      params, key, data, time, timestep_variance_inner, n_iterations_arr)
-    
-    theta_dot_mean_per_iteration = jnp.mean(theta_dot_arr_per_iteration, axis=0)
-    theta_dot_var_per_iteration = (theta_dot_arr_per_iteration - theta_dot_mean_per_iteration) ** 2 / n_iterations_arr.shape[0]
-    del theta_dot_arr_per_iteration
-
-    logging.info("Running variance with n_cg_iterations")
-    theta_dot_arr_w_cg_iterations = get_per_timestep_metric(
-      params, key, data, time, cg_variance_inner, cg_iterations_arr
-    )
-    
-    """
-    logging.info("Running variance with n_samples accumulated")
-    theta_dot_arr_w_samples = get_per_timestep_metric(
-      params, key, data, time, sample_variance_inner, samples_arr
-    )
-    """
-    theta_dot_arr_w_samples = jnp.zeros(10)
-
-    # Probably need to double check with the loss and grads as well, but for now let's see if this works and we can extend from there
-    return theta_dot_mean_per_iteration, theta_dot_var_per_iteration, theta_dot_arr_w_samples, theta_dot_arr_w_cg_iterations
   return step

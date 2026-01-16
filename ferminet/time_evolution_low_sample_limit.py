@@ -75,8 +75,6 @@ def make_td_opt_update_step_full_solve(
     psi = batch_network(
         params, data.positions, data.spins, data.atoms, data.charges)
     
-
-    #print(f"Flat grads dtype {flat_grads.dtype}")
     n_params = flat_grads_.shape[0]
     batch_size = energies.shape[0]
     Ns_minibatch = data.positions.shape[0]

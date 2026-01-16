@@ -44,8 +44,8 @@ from ferminet.stochastic_reconfiguration import \
 from ferminet.time_evolution import \
   make_td_opt_update_step, make_time_evolution_step, cg_err_estimator, \
   pe_e_field
-from ferminet.time_evolution_scaling import make_td_opt_update_step, \
-  make_time_evolution_step
+from ferminet.time_evolution_scaling import make_td_opt_update_step_full_solve, \
+  make_time_evolution_step_low_sample_limit
 from ferminet.frequency_transforms import get_dominant_frequencies
 from ferminet.training_monitoring import wandb_login, start_wandb_run
 from ferminet.visual_tools import \
@@ -836,6 +836,7 @@ def make_local_energy_functions(cfg, signed_network, charges):
         charges=charges,
         nspins=nspins,
         use_scan=False,
+        complex_output=use_complex,
         states=cfg.system.get('states', 0),
         **cfg.system.make_local_energy_kwargs)
   else:
