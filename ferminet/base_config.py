@@ -341,20 +341,20 @@ def default() -> ml_collections.ConfigDict:
         'time_integration': 'rk2',  # One of euler or rk2
         'reset_if_nan': True,
         'damping': 1e-4,
-        'iterations_per_timestep': 10,
+        'iterations_per_timestep': 20,
         'parameter_step': 1e-2,
         'cg_iterations': 200,
         'estimate_error': False,
         'solver': 'psuedoinverse',  # One of psuedoinverse or iterative
         'burn_in_per_timestep': 10,
         'regularization' : {
-          'ac': 1e-5,  # Minimum value for setting eigenvalue to zero
-          'rc': 1e-4,  # max (ac, rc x max(eig)) From Medvidovic et al (2023)
+          'ac': 1e-4,  # Minimum value for setting eigenvalue to zero
+          'rc': 1e-2,  # max (ac, rc x max(eig)) From Medvidovic et al (2023)
         },
         'field' : {  # E_field parameters from Nys et al (2024)
           'E_max': 0.03,
           'w': 0.375,
-          'dt': 0.25,
+          'dt': 0.005,
         },
       },
       'debug_mode': False,

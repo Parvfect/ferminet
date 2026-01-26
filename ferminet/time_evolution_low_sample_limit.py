@@ -162,25 +162,24 @@ def make_td_opt_update_step_full_solve(
   ):
     
     # Create a regularization function here
-    def invert_and_regularize_fisher(fisher):
+    def invert_and_regularize_fisher(fisher, regularization='spectrum'):
       rh, s, vh = jnp.linalg.svd(a=fisher, hermitian=True)
       # Smooth cutoff - Medvidovic et al (2023)
-      lambda2 = jnp.maximum(ac, rc * jnp.max(s)**2)
-      ratio6 = (lambda2 / (s ** 2 + 1e-40)) ** 6
-      eff_rank = 1 / (1 + ratio6)
-      eff_rank = 1.0
 
-      #eff_rank = jnp.sum(ratio6)
-      #f = 1.0 / (1.0 + ratio6)
-      #max_eig = jnp.max(s)
-      #regularized_term = jnp.max(ac, max_eig**2 * rc )  # TODO: Fix tracer error
-      #regularized_term = ac
+      if regularization == 'spectrum':
+        max_eig = jnp.max(s)
+        lambda_2 = jnp.maximum(ac, rc * max_eig)
+        f = 1 / (1 + (lambda_2 / s) ** 6)
+        s_inv =  f/s
+        eff_rank = jnp.sum(f)
+      else:
+        lambda2 = jnp.maximum(ac, rc * jnp.max(s) ** 2)
+        ratio6 = (lambda2 / (s ** 2 + 1e-40)) ** 6
+        eff_rank = 1 / (1 + ratio6)
+        eff_rank = 1.0
+        s_inv = jnp.where(s < ac, 0, (1/s)) # From Medvidovic et al (2023)
+        eff_rank = jnp.sum(jnp.where(s < ac, 1, 0))
 
-      #eff_rank = 1/(1 + (regularized_term / s**2) ** 6)  # TODO: Replace this with max eigenvalue weighting - should bring the error down
-      s_inv = jnp.where(s < ac, 0, (1/s)) # From Medvidovic et al (2023)
-
-      eff_rank = jnp.sum(jnp.where(s < ac, 1, 0))
-      
       SR_inv = (rh * s_inv) @ vh
 
       return SR_inv, eff_rank, s
