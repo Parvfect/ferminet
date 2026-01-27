@@ -44,7 +44,7 @@ from ferminet.stochastic_reconfiguration import \
 from ferminet.time_evolution import \
   make_td_opt_update_step, make_time_evolution_step, cg_err_estimator, \
   pe_e_field
-from ferminet.time_evolution_low_sample_limit import make_td_opt_update_step_full_solve, \
+from ferminet.time_evolution_scaling_2 import make_td_opt_update_step_full_solve, \
   make_time_evolution_step_low_sample_limit
 from ferminet.frequency_transforms import get_dominant_frequencies
 from ferminet.training_monitoring import wandb_login, start_wandb_run
@@ -1273,24 +1273,6 @@ def train(
         metrics['E_eff'] = E_eff
         metrics['E_total'] = E_total
 
-          
-      logprob = batch_network_complex_pmapped(
-        params, data.positions, data.spins, data.atoms, data.charges
-      )
-
-      psi = jnp.exp(logprob)
-
-      # Circular mean of phase
-      arg_psi = jnp.angle(psi)[0][0]
-      #arg_psi = jnp.angle(jnp.mean(psi / jnp.abs(psi)))
-    
-      # Circular variance
-      #std_arg_psi = 1.0 -  jnp.abs(jnp.mean(jnp.exp(1j * )))
-
-      metrics['arg_psi'] = arg_psi
-      #metrics['std_arg_psi'] = std_arg_psi
-      
-      # Burn in for that timestep
       for i in range(cfg.td.burn_in_per_timestep):
         sharded_key, subkeys = kfac_jax.utils.p_split(sharded_key)
         data, params, *_ = burn_in_step(
@@ -1382,6 +1364,8 @@ def train(
           logging_str += ', <S^2>=%03.4f'
           logging_args += obs_data,
       logging.info(logging_str, *logging_args)
+
+      metrics['energy_eff'] = writer_kwargs['ewmean'] + metrics['E_total']
       
       if cfg.td.time_evolution:
         writer_kwargs['simulation_time'] = simulation_time

@@ -14,7 +14,7 @@ from ferminet import constants
 
 def make_td_opt_update_step_full_solve(
     evaluate_loss, batch_network, 
-    iterations_per_timestep=10, ac=1e-5, rc=1e-4):
+    iterations_per_timestep, ac, rc, regularization):
   """Helper functions for td simulation - see make_time_evolution_step"""
 
   # Differentiate wrt parameters (argument 0)
@@ -65,21 +65,23 @@ def make_td_opt_update_step_full_solve(
 
     #build_O = jax.vmap(lambda s: jax.jvp(f, (params,), (unravel_fn(s),))[1])
 
-    chunk_size = 512
+    chunk_size = 512  # depending on how big the chunk size is might need to repeat the other parts of the data pipeline
     n_iterations = int(position_arr.shape[0] / chunk_size)  # Assuming this is generally divisible by 512, otherwise there will be annoying cases
 
     # Building Fisher and grads in chunks
     for i in range(n_iterations):
+      position_slice = lax.dynamic_slice(
+        position_arr, (i * chunk_size, position_arr.shape[1]), (chunk_size, position_arr.shape[1]))
 
       def f(params):
         psi = batch_network(
-        params, lax.dynamic_slice(position_arr, (i * chunk_size, position_arr.shape[1]), (chunk_size, position_arr.shape[1])),
+        params, position_slice,
         data.spins, data.atoms, data.charges)
         return psi
       
-      build_O = jax.vmap(lambda s: jax.jvp(f, (params,), (unravel_fn(s),))[1])
-
-      O_s = build_O(jnp.eye(Np))  # You get Np x Ns O here
+      O_s = jax.jacfwd(f)(params)
+      O_s, _ = jax.flatten_util.ravel_pytree(O_s)
+      O_s = O_s.reshape(Np, chunk_size)
 
       F += O_s @ O_s.T
       grad_vector += O_s @ lax.dynamic_slice(
