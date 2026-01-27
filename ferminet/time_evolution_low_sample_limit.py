@@ -14,7 +14,7 @@ from ferminet import constants
 def make_td_opt_update_step_full_solve(
     evaluate_loss, batch_network,
     iterations_per_timestep,
-     ac=1e-5, rc=1e-4
+     ac, rc, regularization
 ):
   """
   Helper functions for td opt update using full psuedoinverse.
@@ -162,7 +162,7 @@ def make_td_opt_update_step_full_solve(
   ):
     
     # Create a regularization function here
-    def invert_and_regularize_fisher(fisher, regularization='spectrum'):
+    def invert_and_regularize_fisher(fisher):
       rh, s, vh = jnp.linalg.svd(a=fisher, hermitian=True)
       # Smooth cutoff - Medvidovic et al (2023)
 
@@ -172,13 +172,15 @@ def make_td_opt_update_step_full_solve(
         f = 1 / (1 + (lambda_2 / s) ** 6)
         s_inv =  f/s
         eff_rank = jnp.sum(f)
-      else:
+      elif regularization == 'cutoff':
         lambda2 = jnp.maximum(ac, rc * jnp.max(s) ** 2)
         ratio6 = (lambda2 / (s ** 2 + 1e-40)) ** 6
         eff_rank = 1 / (1 + ratio6)
         eff_rank = 1.0
         s_inv = jnp.where(s < ac, 0, (1/s)) # From Medvidovic et al (2023)
         eff_rank = jnp.sum(jnp.where(s < ac, 1, 0))
+      else:
+        raise NotImplementedError("This regularization is not implemented!")
 
       SR_inv = (rh * s_inv) @ vh
 

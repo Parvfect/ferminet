@@ -689,7 +689,7 @@ def get_training_step_function(
       if cfg.td.solver == 'psuedoinverse':
         accumulate_samples, conduct_timestep = make_td_opt_update_step_full_solve(
           evaluate_loss, batch_network_complex, cfg.td.iterations_per_timestep,
-          cfg.td.regularization.ac, cfg.td.regularization.rc
+          cfg.td.regularization.ac, cfg.td.regularization.rc, cfg.td.regularization.type
         )
         step = make_time_evolution_step_low_sample_limit(
         mcmc_step=mcmc_step, optimizer=optimizer,
