@@ -44,12 +44,13 @@ from ferminet.stochastic_reconfiguration import \
 from ferminet.time_evolution import \
   make_td_opt_update_step, make_time_evolution_step, cg_err_estimator, \
   pe_e_field
-from ferminet.time_evolution_scaling_2 import make_td_opt_update_step_full_solve, \
+from ferminet.time_evolution_low_sample_limit import make_td_opt_update_step_full_solve, \
   make_time_evolution_step_low_sample_limit
 from ferminet.frequency_transforms import get_dominant_frequencies
 from ferminet.training_monitoring import wandb_login, start_wandb_run
 from ferminet.visual_tools import \
-  plot_electron_histograms, plot_combined_electron_positions, plot_electron_presence_map
+  plot_electron_histograms, plot_combined_electron_positions, plot_electron_presence_map, \
+  plot_spectral_density
 import jax
 from jax.experimental import multihost_utils
 import jax.numpy as jnp
@@ -65,18 +66,6 @@ def setup_wandb(config={}, running_on_hpc=False):
   # Training monitoring on wandb
   wandb_login(running_on_hpc=running_on_hpc)
   start_wandb_run(config=config, project_name="ferminet-td")
-
-def store_last_gradient():
-    """Transformation that remembers the most recent gradient."""
-    def init_fn(params):
-        return None  # no gradient yet
-
-    def update_fn(updates, state, params=None):
-        new_state = updates  # store the last gradient
-        return updates, new_state
-
-    return optax.GradientTransformation(init_fn, update_fn)
-
 
 def _assign_spin_configuration(
     nalpha: int, nbeta: int, batch_size: int = 1
@@ -654,12 +643,10 @@ def optimizer_setup(
     if cfg.td.time_evolution:
       
       optimizer = optax.chain(
-        store_last_gradient(),
         optax.scale(cfg.td.parameter_step),)  # the -1j is done within the update itself
 
     else:
       optimizer = optax.chain(
-        store_last_gradient(),
         optax.scale_by_schedule(learning_rate_schedule),
         optax.scale(-1.),)
   else:
@@ -1241,9 +1228,14 @@ def train(
     if cfg.td.time_evolution:
       simulation_time = t - t_init
       
+      #grad_vector = jnp.zeros((n_params, 1), dtype=complex)
+      #fisher = jnp.zeros((n_params, n_params), dtype=complex)
+      #O_means = jnp.zeros(n_params, dtype=complex)
+      
       data, params, opt_state, loss, aux_data, pmove, theta_dot, metrics = step(
             data,
             params,
+            #grad_vector, fisher, O_means,
             opt_state,
             simulation_time,
             subkeys,
@@ -1283,6 +1275,16 @@ def train(
             mcmc_width=mcmc_width)
       
       r2_int += jnp.mean(metrics['r2'])
+
+      if t % 100 == 0:
+        old_eigs = metrics["eigenvalues_unregularized"]
+        s = metrics["eigenvalues"]
+        print(old_eigs)
+        print(s)
+        plot_spectral_density(
+          metrics["eigenvalues_unregularized"], title="Spectral density unregularized")
+        plot_spectral_density(
+          metrics["eigenvalues"], title="Spectral density regularized")
 
     else:
       data, params, opt_state, loss, aux_data, pmove = step(
@@ -1364,12 +1366,11 @@ def train(
           logging_str += ', <S^2>=%03.4f'
           logging_args += obs_data,
       logging.info(logging_str, *logging_args)
-
-      metrics['energy_eff'] = writer_kwargs['ewmean'] + metrics['E_total']
       
       if cfg.td.time_evolution:
         writer_kwargs['simulation_time'] = simulation_time
         writer_kwargs['r2_int'] = jnp.real(r2_int).astype(float)
+        metrics['energy_eff'] = np.asarray(weighted_stats.mean) + metrics['E_total']
         for metric in metrics:
           writer_kwargs[metric] = jnp.mean(jnp.real(
             metrics[metric]).astype(float))

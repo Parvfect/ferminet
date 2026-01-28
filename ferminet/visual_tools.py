@@ -7,16 +7,8 @@ import matplotlib.colors as colors
 from matplotlib import cm
 import wandb
 from matplotlib.backends.backend_agg import FigureCanvasAgg
-
-
-import matplotlib.pyplot as plt
-import numpy as np
 import math
 
-import numpy as np
-import matplotlib.pyplot as plt
-import math
-from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 def plot_combined_electron_positions(pos, bins=50, figsize=(8, 8)):
     """
@@ -290,3 +282,29 @@ def save_scatter_plot(pos, prob_density):
 
     wandb.log({"scatter": wandb.Image(fig)})
     return []
+
+
+def plot_spectral_density(eigs, num_points=2000, title="Spectral density"):
+    # Ensure 1D NumPy array
+    eigs = np.asarray(eigs).reshape(-1)
+
+    sigma = (eigs.max() - eigs.min()) / 100
+    grid = np.linspace(eigs.min() - 0.5, eigs.max() + 0.5, num_points)
+
+    # Vectorized Gaussian broadening
+    diff = grid[:, None] - eigs[None, :]
+    rho = np.exp(-diff**2 / (2 * sigma**2)).sum(axis=1)
+
+    rho /= (np.sqrt(2 * np.pi) * sigma * len(eigs))
+
+    fig, ax = plt.subplots(figsize=(5, 4))
+    mask = grid > 0
+    ax.plot(grid[mask], rho[mask])
+    ax.set_xscale("log")
+    ax.set_xlabel("Eigenvalue λ")
+    ax.set_ylabel(r"$\rho(\lambda)$")
+    ax.set_title(f"Gaussian broadened spectral density (σ = {sigma:.3g})")
+    fig.tight_layout()
+
+    wandb.log({title: wandb.Image(fig)})
+    plt.close(fig)

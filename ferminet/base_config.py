@@ -245,7 +245,7 @@ def default() -> ml_collections.ConfigDict:
           'ferminet': {
               # FermiNet architecture: Pfau, Spencer, Matthews, Foulkes, Phys
               # Rev Research 033429 (2020).
-              'hidden_dims': ((16, 4), (32, 8), (16, 8)),     #((256, 32), (256, 32), (256, 32), (256, 32)),
+              'hidden_dims': ((8, 4), (8, 4), (16, 8)),     #((256, 32), (256, 32), (256, 32), (256, 32)),
               # Whether to use the last layer of the two-electron stream of the
               # FermiNet.
               'use_last_layer': False,
@@ -288,7 +288,7 @@ def default() -> ml_collections.ConfigDict:
               'use_layer_norm': True,
           },
           # Config common to all architectures.
-          'determinants': 8, #16,  # Number of determinants.
+          'determinants': 6, #16,  # Number of determinants.
           'bias_orbitals': False,  # include bias in last layer to orbitals
           # If true, determinants are dense rather than block-sparse
           'full_det': True,

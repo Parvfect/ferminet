@@ -74,7 +74,7 @@ def make_td_opt_update_step_full_solve(
       return O_minibatch
 
     O_minibatch = compute_SR_chunked(
-      params, data, chunk_size=512)
+      params, data, chunk_size=128)
     
     O_means += jnp.sum(O_minibatch, axis=1)
     fisher += O_minibatch @ O_minibatch.T / Ns_minibatch
@@ -144,14 +144,10 @@ def make_td_opt_update_step_full_solve(
     r2 = A + B  # Carleo's residual - integrated infidelity
     metrics = {
       "force_vector_residual": A,
-      "grad_vector": grad_vector,
-      "theta_dot": theta_dot,
       "S_residual": B,
       "linear_system_residual": r,
       "r2": r2,
-      "effective_rank": eff_rank,
-      "grad_vector": grad_vector,
-      "eigenvalues": eigs,
+      "effective_rank": eff_rank
     }
 
     return theta_dot, metrics
@@ -179,21 +175,24 @@ def make_time_evolution_step_low_sample_limit(
   adjusted as needed to deal with time integration.
   """
   @functools.partial(constants.pmap,
-                      in_axes=(0, 0, 0, None, 0, 0),
+                      in_axes=(0, 0, None, None, None, None, None, 0, None),
                       donate_argnums=(0, 1, 2))
   def step(
     data: networks.FermiNetData,
     params: networks.ParamTree,
-    opt_state: optax.OptState,
-    time: float,
-    key: chex.PRNGKey,
-    mcmc_width: jnp.ndarray
+    grad_vector, fisher, O_means,
+    opt_state,
+    time,
+    key,
+    mcmc_width
 ):
     """
     A full update iteration with integration: MCMC steps + optimization
     For a single timestep
     """
     # MCMC loop
+
+    
 
     batch_size = data.positions.shape[0]
     flat_params, unravel_fn = jax.flatten_util.ravel_pytree(
@@ -219,11 +218,11 @@ def make_time_evolution_step_low_sample_limit(
 
     logging.info(f"Starting sample accumulation for timestep")
 
-    def rk2_inner_fn(params, key, data, time):
+    def rk2_inner_fn(params, key, data, time, grad_vector, fisher, O_means):
       
-      grad_vector = jnp.zeros((n_params, 1), dtype=complex)
-      fisher = jnp.zeros((n_params, n_params), dtype=complex)
-      O_means = jnp.zeros(n_params, dtype=complex)
+      #grad_vector = jnp.zeros((n_params, 1), dtype=complex)
+      #fisher = jnp.zeros((n_params, n_params), dtype=complex)
+      #O_means = jnp.zeros(n_params, dtype=complex)
 
       mcmc_key, key = jax.random.split(key, num=2)
 
@@ -249,7 +248,7 @@ def make_time_evolution_step_low_sample_limit(
 
     logging.info("Starting integration first step")
     data, pmove, loss, aux_data, theta_dot_1, metrics = constants.pmean(
-      rk2_inner_fn(params, key, data, time))
+      rk2_inner_fn(params, key, data, time, grad_vector, fisher, O_means))
     theta_dot_1 =  theta_dot_1  # Real param evolution
 
     if time_integration == 'rk2':
@@ -260,7 +259,7 @@ def make_time_evolution_step_low_sample_limit(
 
       logging.info("Starting RK2 second step")
       data, pmove, _, _, theta_dot_2, metrics = constants.pmean(
-        rk2_inner_fn(params_mid, key, data, time))
+        rk2_inner_fn(params_mid, key, data, time, grad_vector, fisher, O_means))
       theta_dot_2 = theta_dot_2  # Removing 1j as per the McLachan varaiaitonal principle
       theta_dot = theta_dot_2
     
