@@ -353,8 +353,8 @@ def default() -> ml_collections.ConfigDict:
           'type': "cutoff",
         },
         'field' : {  # E_field parameters from Nys et al (2024)
-          'E_max': 0.03,
-          'w': 0.375,
+          'E_max': 0.07,
+          'w': 0.13,
           'dt': 0.005,
         },
       },
