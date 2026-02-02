@@ -8,6 +8,7 @@ from absl import logging
 from typing import Optional, Mapping, Sequence, Tuple, Union
 from ferminet import networks
 from ferminet import constants
+from jax.tree_util import tree_map
 
 
 
@@ -249,6 +250,7 @@ def make_time_evolution_step_low_sample_limit(
     iterations_per_timestep,
     n_electrons,
     burn_in_per_timestep,
+    dt,
     reset_if_nan: bool = False,
     time_integration = 'rk2'
 ):
@@ -337,15 +339,29 @@ def make_time_evolution_step_low_sample_limit(
 
     if time_integration == 'rk2':
 
-      half_updates, _ = optimizer.update(
-        unravel_fn(theta_dot_1 * 0.5), opt_state, params)
-      params_mid = optax.apply_updates(params, half_updates)
-
-      logging.info("Starting RK2 second step")
+      # Stage 2
+      params_k2 = flat_params + (dt / 2.0) * theta_dot_1
       data, pmove, _, _, theta_dot_2, metrics = constants.pmean(
-        rk2_inner_fn(params_mid, key, data, time))
-      theta_dot_2 = theta_dot_2  # Removing 1j as per the McLachan varaiaitonal principle
-      theta_dot = theta_dot_2
+          rk2_inner_fn(unravel_fn(params_k2), key, data, time + dt / 2.0)
+      )
+
+      # Stage 3
+      params_k3 = flat_params + (dt / 2.0) * theta_dot_2
+
+
+      data, pmove, _, _, theta_dot_3, metrics = constants.pmean(
+          rk2_inner_fn(unravel_fn(params_k3), key, data, time + dt / 2.0)
+      )
+
+      # Stage 4
+      params_k4 = flat_params + dt * theta_dot_3
+
+      data, pmove, _, _, theta_dot_4, metrics = constants.pmean(
+          rk2_inner_fn(unravel_fn(params_k4), key, data, time + dt)
+      )
+
+      # Combine slopes
+      theta_dot = (theta_dot_1 + 2*theta_dot_2 + 2*theta_dot_3 + theta_dot_4) / 6.0
     
     else:
       theta_dot = theta_dot_1

@@ -405,7 +405,7 @@ def local_energy(
   if cfg:  # Time evolution
     E_max = cfg.td.field.E_max
     w = cfg.td.field.w
-    dt = cfg.td.field.dt
+    dt = cfg.td.dt
   else:
     E_max, w, dt = 0.0, 0.0, 0.0
 

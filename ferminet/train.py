@@ -643,12 +643,12 @@ def optimizer_setup(
     if cfg.td.time_evolution:
       
       optimizer = optax.chain(
-        optax.scale(cfg.td.parameter_step),)  # the -1j is done within the update itself
+        optax.scale(cfg.td.dt),)  # the -1j is done within the update itself
 
     else:
       optimizer = optax.chain(
         optax.scale_by_schedule(learning_rate_schedule),
-        optax.scale(-1.),)
+        optax.scale(-1.),)  # this should be changed
   else:
     raise ValueError(f'Not a recognized optimizer: {cfg.optim.optimizer}')
 
@@ -683,6 +683,7 @@ def get_training_step_function(
         accumulate_samples=accumulate_samples, conduct_timestep=conduct_timestep,
         iterations_per_timestep=cfg.td.iterations_per_timestep,
         n_electrons=n_electrons, burn_in_per_timestep=cfg.td.burn_in_per_timestep,
+        dt=cfg.td.dt,
         reset_if_nan=cfg.td.reset_if_nan,
         time_integration=cfg.td.time_integration
       )
@@ -1178,7 +1179,7 @@ def train(
   batch_network_pmapped = constants.pmap(batch_network)
   batch_network_complex_pmapped = constants.pmap(batch_network_complex)
   eff_pe, pe_tot = pe_e_field(
-    cfg.td.field.E_max, cfg.td.field.w, cfg.td.field.dt)
+    cfg.td.field.E_max, cfg.td.field.w, cfg.td.dt)
   vmapped_E = jax.vmap(eff_pe, in_axes=(0, None))
 
   if cfg.debug_options.notebook:  # For testing applications via jupyter
@@ -1279,8 +1280,6 @@ def train(
       if t % 100 == 0:
         old_eigs = metrics["eigenvalues_unregularized"]
         s = metrics["eigenvalues"]
-        print(old_eigs)
-        print(s)
         plot_spectral_density(
           metrics["eigenvalues_unregularized"], title="Spectral density unregularized")
         plot_spectral_density(
@@ -1409,10 +1408,10 @@ def train(
     if cfg.log.frequency_plots and (t - t_init) % cfg.log.frequency_log_frequency == 0:
 
       freqs_dip, amps_dip = get_dominant_frequencies(
-        mu_z_arr, cfg.td.field.dt, k=6, use_radians=True)
+        mu_z_arr, cfg.td.dt, k=6, use_radians=True)
       
       freqs_energy, amps_energy = get_dominant_frequencies(
-        E_arr, cfg.td.field.dt, k=6, use_radians=True
+        E_arr, cfg.td.dt, k=6, use_radians=True
       )
 
       wandb.log({
