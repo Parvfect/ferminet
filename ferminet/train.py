@@ -948,7 +948,7 @@ def train(
 
   if cfg.log.wandb:
     setup_wandb(
-      running_on_hpc=False, config=cfg.to_dict(), project_name=cfg.wandb_project_name)
+      running_on_hpc=False, config=cfg.to_dict(), project_name=cfg.log.wandb_project_name)
 
   num_devices, num_hosts, num_states, host_batch_size, total_host_batch_size, device_batch_size, data_shape = device_setup(cfg)
   logging.info("Device setup")
