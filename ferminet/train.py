@@ -51,10 +51,11 @@ from typing_extensions import Protocol
 import wandb
 
 
-def setup_wandb(config={}, running_on_hpc=False):
+def setup_wandb(
+    config={}, running_on_hpc=False, project_name='ferminet'):
   # Training monitoring on wandb
   wandb_login(running_on_hpc=running_on_hpc)
-  start_wandb_run(config=config, project_name="ferminet")
+  start_wandb_run(config=config, project_name=project_name)
 
 """
 def _assign_spin_configuration(
@@ -499,7 +500,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
   # Wandb logging
   if cfg.log.wandb:
     setup_wandb(
-      running_on_hpc=False, config=cfg.to_dict())
+      running_on_hpc=False, config=cfg.to_dict(), project_name=cfg.log.wandb_project_name)
 
 
   # Check if mol is a pyscf molecule and convert to internal representation

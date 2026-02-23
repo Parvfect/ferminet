@@ -142,7 +142,8 @@ def default() -> ml_collections.ConfigDict:
           # wavefunction dependent on using log_energy mode or not for each
           # walker at each step
           'features': False,
-          'wandb': False,
+          'wandb': True,
+          'wandb_project_name': 'muons'
       },
       'system': {
           'type': SystemType.MOLECULE.value,
