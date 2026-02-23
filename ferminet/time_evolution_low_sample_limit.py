@@ -216,7 +216,7 @@ def make_td_opt_update_step_full_solve(
     
     grad_vector = grad_vector / Ns
 
-    theta_dot = (SR_inv @ grad_vector).reshape(Np,)
+    theta_dot = -1j * (SR_inv @ grad_vector).reshape(Np,)
 
     theta_dot_real = jnp.real(theta_dot)  # Real param evolution
     #theta_dot = grad_vector
@@ -335,7 +335,6 @@ def make_time_evolution_step_low_sample_limit(
     logging.info("Starting integration first step")
     data, pmove, loss, aux_data, theta_dot_1, metrics = constants.pmean(
       rk2_inner_fn(params, key, data, time))
-    theta_dot_1 =  theta_dot_1  # Real param evolution
 
     if time_integration == 'rk2':
 
@@ -344,6 +343,7 @@ def make_time_evolution_step_low_sample_limit(
       data, pmove, _, _, theta_dot_2, metrics = constants.pmean(
           rk2_inner_fn(unravel_fn(params_k2), key, data, time + dt / 2.0)
       )
+      """
 
       # Stage 3
       params_k3 = flat_params + (dt / 2.0) * theta_dot_2
@@ -362,6 +362,8 @@ def make_time_evolution_step_low_sample_limit(
 
       # Combine slopes
       theta_dot = (theta_dot_1 + 2*theta_dot_2 + 2*theta_dot_3 + theta_dot_4) / 6.0
+      """
+      theta_dot = theta_dot_2
     
     else:
       theta_dot = theta_dot_1

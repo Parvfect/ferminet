@@ -62,10 +62,12 @@ from typing_extensions import Protocol
 import wandb
 
 
-def setup_wandb(config={}, running_on_hpc=False):
+def setup_wandb(
+    config={}, running_on_hpc=False, project_name='ferminet-td'):
   # Training monitoring on wandb
   wandb_login(running_on_hpc=running_on_hpc)
-  start_wandb_run(config=config, project_name="ferminet-td")
+  start_wandb_run(
+    config=config, project_name=project_name)
 
 def _assign_spin_configuration(
     nalpha: int, nbeta: int, batch_size: int = 1
@@ -945,7 +947,8 @@ def train(
   """
 
   if cfg.log.wandb:
-    setup_wandb(running_on_hpc=False, config=cfg.to_dict())
+    setup_wandb(
+      running_on_hpc=False, config=cfg.to_dict(), project_name=cfg.wandb_project_name)
 
   num_devices, num_hosts, num_states, host_batch_size, total_host_batch_size, device_batch_size, data_shape = device_setup(cfg)
   logging.info("Device setup")
@@ -1276,8 +1279,10 @@ def train(
             mcmc_width=mcmc_width)
       
       r2_int += jnp.mean(metrics['r2'])
+      metrics['eig_range'] = max(
+        metrics["eigenvalues_unregularized"]) - min(metrics["eigenvalues_unregularized"])
 
-      if t % 100 == 0:
+      if t % 1000 == 0:
         old_eigs = metrics["eigenvalues_unregularized"]
         s = metrics["eigenvalues"]
         plot_spectral_density(

@@ -157,6 +157,7 @@ def default() -> ml_collections.ConfigDict:
           # walker at each step
           'features': False,
           'wandb': True,
+          'wandb_project_name': 'ferminet-td',
       },
       'system': {
           'type': SystemType.MOLECULE.value,

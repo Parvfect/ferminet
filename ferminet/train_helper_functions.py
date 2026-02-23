@@ -267,7 +267,6 @@ def optimizer_setup(
     if cfg.td.time_evolution:
       
       optimizer = optax.chain(
-        store_last_gradient(),
         optax.scale(cfg.td.parameter_step),)  # the -1j is done within the update itself
 
     else:
