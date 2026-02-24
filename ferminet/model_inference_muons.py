@@ -282,5 +282,5 @@ gamma_mu = (g_mu * mu_mu) / (hbar)  # units of  T-1 S-1 = KG-1 S1 A1
 A_constant = (mu_0 * 2 * hbar) / (3)
 A_value = A_constant * gamma_e * gamma_mu * y_in_SI
 A_value_freq = A_value / (2 * np.pi)
-print(f"Fermi contact coupling A Hz : {A_value_freq}")
+print(f"Fermi contact coupling |A| MHz : {jnp.abs(A_value_freq * 1e-6)}")
 print(gamma_e, gamma_mu, A_constant)
