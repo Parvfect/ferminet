@@ -45,6 +45,4 @@ def get_config():
         "species_masses": cfg.network.gcmnnwf.masses,
     }
 
-    cfg.log.save_frequency = 1000
-
     return cfg
