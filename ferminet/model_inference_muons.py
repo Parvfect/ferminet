@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.constants import physical_constants
+from scipy.optimize import curve_fit
 from ferminet import checkpoint
 from ferminet import networks
 from ferminet.configs import muonioum
