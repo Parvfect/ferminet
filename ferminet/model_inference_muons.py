@@ -16,9 +16,9 @@ from ferminet import mcmc
 
 logger = logging.getLogger(__name__)
 
-host_batch_size = 512
+host_batch_size = 4096
 n_gpu = 1
-ckpt_restore_filename = "muonioum/qmcjax_ckpt_003326.npz"
+ckpt_restore_filename = "muonioum/hpc_muon_4096.npz"
 
 cfg = muonioum.get_config()
 (t_init,
@@ -140,33 +140,10 @@ psi(params, data)
 key, subkey = jax.random.split(key, num=2)
 """
 
-def compute_observable(pos):
-    electron_samples = ...
-    muon_samples = ...
-    muon_electron_seperations_cart = ...
-    muon_electron_seperations = ...
-
-    n_bins = 4000 // 20
-    max_radius = 20 // 20
-
-    bin_heights, bin_edges = np.histogram(
-        muon_electron_seperations, bins=n_bins, range=(0, max_radius)
-    )
-    bin_normalization = (4/3) * np.pi * (bin_edges[1:] ** 3 - bin_edges[:-1] ** 3)
-    bin_heights_normalized = ...
-
-    electron_x = ...
-    electron_y = ...
-
-    muon_x = ...
-    muon_y = ...
-
-    return jnp.mean(pos)
-
 key, subkey = jax.random.split(key)
 data, pmove = mcmc_step(params, data, subkey, mcmc_width_ckpt)
 
-n_samples = 1e5
+n_samples = 1e6
 n_steps = int(n_samples / host_batch_size)
 position_data = jnp.zeros((n_steps, n_gpus, pos.shape[1], pos.shape[2]))
 mcmc_step = jax.jit(mcmc_step)
@@ -176,6 +153,8 @@ for i in tqdm(range(n_steps)):
     data, pmove = mcmc_step(params, data, subkey, mcmc_width_ckpt)
     position_data = position_data.at[i].set(data.positions)
 
+
+## Observable computing - copied from https://github.com/colourfulLanguage/masters-project/blob/master/methyl/methyl_analysis.py
 
 total_points = (
     position_data.shape[0] * position_data.shape[1] * position_data.shape[2]
@@ -223,7 +202,7 @@ plt.savefig("plots/muonium_seperation.png")
 
 # Define the exponential function to fit
 def exp_func(r, A, B):
-    B = 2 * 0.9951857
+    #B = 2 * 0.9951857
     return A * np.exp(-B * r)
 
 # Bin centers
